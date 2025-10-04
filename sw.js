@@ -1,4 +1,4 @@
-const CACHE = 'rkb-app-v1.23';
+const CACHE = 'rkb-app-v1.25';
 const ASSETS = [
   './',
   './index.html',

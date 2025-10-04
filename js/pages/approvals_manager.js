@@ -141,13 +141,16 @@ Pages.approvalsManager = function () {
     });
 
     const tb = U.qs("#rows");
-    tb.innerHTML = rows.map((r,i)=>`
+    tb.innerHTML = rows.map((r,i)=>{
+    const perStr = U.fmt.periodeYM(r.periode);     // ← YYYY-MM (WIB)
+    const hkStr  = U.fmt.hk(r.hk_total || 0);      // ← ribuan + 2 desimal
+    return `
       <tr>
         <td>${i+1}</td>
         <td>${r.nomor}</td>
         <td>${r.divisi || "-"}</td>
-        <td>${toPeriodeWIB(r.periode)}</td>
-        <td>${Number(r.hk_total || 0).toFixed(2)}</td>
+        <td>${perStr}</td>
+        <td>${hkStr}</td>
         <td>
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-secondary" data-a="view" data-i="${i}">Lihat</button>
@@ -155,7 +158,8 @@ Pages.approvalsManager = function () {
             <button class="btn btn-success" data-a="approve" data-i="${i}">Approve</button>
           </div>
         </td>
-      </tr>`).join('');
+      </tr>`
+    }).join('');
 
     tb.querySelectorAll("button").forEach(btn=>{
       btn.addEventListener("click", async ()=>{

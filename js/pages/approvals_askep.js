@@ -129,35 +129,38 @@ Pages.approvalsAskep = function () {
   }
 
   function render(rows) {
-    root.innerHTML = `
-    <div class="card shadow-sm"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h4 class="mb-0">Approval Askep</h4>
-        <div class="d-flex gap-2">
-          <button id="btn-reload" class="btn btn-sm btn-outline-secondary">Muat Ulang (Server)</button>
-        </div>
+  root.innerHTML = `
+  <div class="card shadow-sm"><div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h4 class="mb-0">Approval Askep</h4>
+      <div class="d-flex gap-2">
+        <button id="btn-reload" class="btn btn-sm btn-outline-secondary">Muat Ulang (Server)</button>
       </div>
-      <div class="table-responsive"><table class="table table-sm table-hover">
-        <thead><tr><th>No</th><th>Nomor</th><th>Divisi</th><th>Periode</th><th>HK Total</th><th>Aksi</th></tr></thead>
-        <tbody id="rows"></tbody></table></div>
-    </div></div>`;
+    </div>
+    <div class="table-responsive"><table class="table table-sm table-hover">
+      <thead><tr><th>No</th><th>Nomor</th><th>Divisi</th><th>Periode</th><th>HK Total</th><th>Aksi</th></tr></thead>
+      <tbody id="rows"></tbody></table></div>
+  </div></div>`;
 
-    U.qs("#btn-reload").onclick = () => load(false);
+  U.qs("#btn-reload").onclick = () => load(false);
 
-    rows.sort((a,b)=>{
-      const ta = new Date(a.updated_at || a.created_at || 0).getTime();
-      const tb = new Date(b.updated_at || b.created_at || 0).getTime();
-      return (tb||0)-(ta||0);
-    });
+  rows.sort((a,b)=>{
+    const ta = new Date(a.updated_at || a.created_at || 0).getTime();
+    const tb = new Date(b.updated_at || b.created_at || 0).getTime();
+    return (tb||0)-(ta||0);
+  });
 
-    const tb = U.qs("#rows");
-    tb.innerHTML = rows.map((r,i)=>`
+  const tb = U.qs("#rows");
+  tb.innerHTML = rows.map((r,i)=>{
+    const perStr = U.fmt.periodeYM(r.periode);     // ← YYYY-MM (WIB)
+    const hkStr  = U.fmt.hk(r.hk_total || 0);      // ← ribuan + 2 desimal
+    return `
       <tr>
         <td>${i+1}</td>
         <td>${r.nomor}</td>
         <td>${r.divisi || "-"}</td>
-        <td>${toPeriodeWIB(r.periode)}</td>
-        <td>${Number(r.hk_total || 0).toFixed(2)}</td>
+        <td>${perStr}</td>
+        <td>${hkStr}</td>
         <td>
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-secondary" data-a="view" data-i="${i}">Lihat</button>
@@ -165,75 +168,74 @@ Pages.approvalsAskep = function () {
             <button class="btn btn-success" data-a="approve" data-i="${i}">Approve</button>
           </div>
         </td>
-      </tr>`).join('');
+      </tr>`;
+  }).join('');
 
-    tb.querySelectorAll('button').forEach(btn=>{
-      btn.addEventListener('click', async ()=>{
-        const i = +btn.dataset.i;
-        const a = btn.dataset.a;
-        const r = rows[i];
-        const tr = btn.closest('tr');
-        const btns = tr.querySelectorAll('button');
-        const setBusy = (v)=> btns.forEach(b=> b.disabled = v);
+  tb.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const i = +btn.dataset.i;
+      const a = btn.dataset.a;
+      const r = rows[i];
+      const tr = btn.closest('tr');
+      const btns = tr.querySelectorAll('button');
+      const setBusy = (v)=> btns.forEach(b=> b.disabled = v);
 
-        if(a==='view'){ showDetail(r.nomor); return; }
+      if(a==='view'){ showDetail(r.nomor); return; }
 
-        if(a==='comment'){
-          const text = prompt('Tulis komentar perbaikan untuk Asisten:');
-          if(!text) return;
-          try{
-            setBusy(true);
-            const s = await API.call('askepComment', { nomor: r.nomor, text });
-            if(!s.ok) throw new Error(s.error||'Gagal');
+      if(a==='comment'){
+        const text = prompt('Tulis komentar perbaikan untuk Asisten:');
+        if(!text) return;
+        try{
+          setBusy(true);
+          const s = await API.call('askepComment', { nomor: r.nomor, text });
+          if(!s.ok) throw new Error(s.error||'Gagal');
 
-            // update cache lokal (status -> draft)
-            const act = getActualRkb();
-            const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          const act = getActualRkb();
+          const idx = act.findIndex(x=> x.nomor===r.nomor);
+          if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
 
-            tr.remove();
-            U.toast('Komentar terkirim.','success');
-          }catch(e){
-            // offline → masukkan ke outbox actions, update UI lokal
-            queueAction('askepComment', { nomor:r.nomor, text });
-            const act = getActualRkb();
-            const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
-            tr.remove();
-            U.toast('Offline: komentar diantrikan ke Outbox.','warning');
-          }finally{
-            setBusy(false);
-          }
-          return;
+          tr.remove();
+          U.toast('Komentar terkirim.','success');
+        }catch(e){
+          queueAction('askepComment', { nomor:r.nomor, text });
+          const act = getActualRkb();
+          const idx = act.findIndex(x=> x.nomor===r.nomor);
+          if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          tr.remove();
+          U.toast('Offline: komentar diantrikan ke Outbox.','warning');
+        }finally{
+          setBusy(false);
         }
+        return;
+      }
 
-        if(a==='approve'){
-          try{
-            setBusy(true);
-            const s = await API.call('askepApprove', { nomor: r.nomor });
-            if(!s.ok) throw new Error(s.error||'Gagal');
+      if(a==='approve'){
+        try{
+          setBusy(true);
+          const s = await API.call('askepApprove', { nomor: r.nomor });
+          if(!s.ok) throw new Error(s.error||'Gagal');
 
-            const act = getActualRkb();
-            const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          const act = getActualRkb();
+          const idx = act.findIndex(x=> x.nomor===r.nomor);
+          if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
 
-            tr.remove();
-            U.toast('Approved.','success');
-          }catch(e){
-            // offline → queue ke outbox
-            queueAction('askepApprove', { nomor:r.nomor });
-            const act = getActualRkb();
-            const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
-            tr.remove();
-            U.toast('Offline: approval diantrikan ke Outbox.','warning');
-          }finally{
-            setBusy(false);
-          }
+          tr.remove();
+          U.toast('Approved.','success');
+        }catch(e){
+          queueAction('askepApprove', { nomor:r.nomor });
+          const act = getActualRkb();
+          const idx = act.findIndex(x=> x.nomor===r.nomor);
+          if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          tr.remove();
+          U.toast('Offline: approval diantrikan ke Outbox.','warning');
+        }finally{
+          setBusy(false);
         }
-      });
+      }
     });
-  }
+  });
+}
+
 
   load(true);
 };

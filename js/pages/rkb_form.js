@@ -33,14 +33,33 @@ Pages.rkbForm = function(){
   const estateObj = (M.estate||[]).find(e=> e.id === (myOrg.estate_id||'')) || {};
   const ESTATE = estateObj.nama_panjang || profile.estate_full || 'UNKNOWN ESTATE';
 
+  // ===  Scope ID lengkap dari user/org ===
+const DIVISI_ID = myOrg.divisi_id || profile.divisi_id || DIVISI;
+const ESTATE_ID = myOrg.estate_id || profile.estate_id || '';
+const RAYON_ID  = myOrg.rayon_id  || profile.rayon_id  || '';
+
   // Draft buffer (auto save) — header RKB + daftar pekerjaan (items)
-  const DKEY = 'rkb.form.buffer';
-  let F = U.S.get(DKEY, {
-    divisi: DIVISI,
-    periode: '', // yyyy-mm
-    nomor: '',
-    items: [],   // daftar pekerjaan [{...itemPekerjaan}]
-  });
+const DKEY = 'rkb.form.buffer';
+let F = U.S.get(DKEY, {
+  // label lama tetap
+  divisi: DIVISI,
+  // ===  scope id & label lengkap ===
+  divisi_id: DIVISI_ID,
+  estate_id: ESTATE_ID,
+  rayon_id:  RAYON_ID,
+  estate_full: ESTATE,
+
+  periode: '', // yyyy-mm
+  nomor: '',
+  items: [],
+});
+// normalisasi periode & label awal
+F.periode = fPeriode(F.periode);
+if (F.nomor) {
+  F.status_label = computeRevisionTag(F.nomor);
+}
+// jika draft dari server & items kosong → isi dari actuals
+hydrateFromActualsIfNeeded();
 
   // Satu "item pekerjaan" (yang sedang diisi di form atas)
   function defaultItem(){
@@ -71,6 +90,86 @@ Pages.rkbForm = function(){
     return {BHL, SKU, BHB, total: (BHL+SKU+BHB)};
   }
 
+  // Format periode ke YYYY-MM (Asia/Jakarta)
+function fPeriode(p){
+  if(!p) return '';
+  const s = String(p).trim();
+  if(/^\d{4}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if(isNaN(d)) return s;
+  const tz='Asia/Jakarta';
+  const y = new Intl.DateTimeFormat('id-ID',{timeZone:tz, year:'numeric'}).format(d);
+  const m = new Intl.DateTimeFormat('id-ID',{timeZone:tz, month:'2-digit'}).format(d);
+  return `${y}-${m}`;
+}
+
+// draft r1/r2/r3 berdasar jumlah komentar Askep/Manager pada nomor tsb
+function computeRevisionTag(nomor){
+  try{
+    const comments = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_comments')||[]) : [];
+    const revs = comments.filter(c =>
+      String(c.nomor)===String(nomor) &&
+      (String(c.role||'').toLowerCase()==='askep' || String(c.role||'').toLowerCase()==='manager')
+    ).length;
+    return revs>0 ? `draft r${revs}` : 'draft';
+  }catch(_){ return 'draft'; }
+}
+
+// Jika buffer berasal dari server (__serverLinked) & items kosong → muat dari actuals
+function hydrateFromActualsIfNeeded(){
+  if(!F || !F.__serverLinked) return;
+  if(Array.isArray(F.items) && F.items.length) return;
+
+  const itemsAll = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_items')||[]) : [];
+  const bahanAll = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_bahan')||[]) : [];
+
+  const rowsI = itemsAll.filter(i => String(i.nomor)===String(F.nomor));
+  if(!rowsI.length) return; // tidak ada di cache actuals → biarkan kosong (bisa diambil via detail API di tempat lain)
+
+  const bahanByIdx = {};
+  bahanAll.filter(b => String(b.nomor)===String(F.nomor)).forEach(b=>{
+    const k = String(b.item_idx||'');
+    (bahanByIdx[k] = bahanByIdx[k] || []).push({
+      nama: b.nama || '',
+      jumlah: Number(b.jumlah||0),
+      satuan: b.satuan || ''
+    });
+  });
+
+  F.items = rowsI.map(r=>{
+    const lokasiArr = (String(r.lokasi||'').split(',').map(s=>s.trim()).filter(Boolean) || [])
+      .map(nm => ({type:'', name:nm, luas:undefined}));
+    const it = {
+      pekerjaan: r.pekerjaan || '',
+      activity_type: r.activity_type || '',
+      lokasi: lokasiArr,
+      volume: Number(r.volume||0),
+      satuan: r.satuan || '',
+      hk_unit: Number(r.hk_unit||0),
+      pct_bhl: Number(r.pct_bhl||0),
+      pct_sku: Number(r.pct_sku||0),
+      pct_bhb: Number(r.pct_bhb||0),
+      bahan: bahanByIdx[String(r.idx||'')] || [],
+      pengawas: r.pengawas || ''
+    };
+    it.hk = computeHK(it);
+    return it;
+  });
+
+  // pastikan periode normal, status diset 'draft' dengan tag revisi
+  F.periode = fPeriode(F.periode);
+  F.status  = 'draft';
+  F.status_label = computeRevisionTag(F.nomor);
+
+    // === jaga-jaga: isi scope ID bila kosong di buffer server-linked
+  if (!F.divisi_id) F.divisi_id = DIVISI_ID;
+  if (!F.estate_id) F.estate_id = ESTATE_ID;
+  if (!F.rayon_id)  F.rayon_id  = RAYON_ID;
+  if (!F.estate_full) F.estate_full = ESTATE;
+
+  saveBufferThin();
+}
+
   function hkBadge(hk){
     return `
       <div class="d-flex flex-wrap gap-2">
@@ -86,16 +185,21 @@ Pages.rkbForm = function(){
     const hkNow = computeHK(CUR);
     root.innerHTML = `
     <div class="card shadow-sm"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h4>Form RKB</h4>
-        <div class="small text-muted">${ESTATE} · ${DIVISI}</div>
-      </div>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Form RKB
+    ${F.__serverLinked ? '<span class="badge text-bg-light border ms-2" title="Data berasal dari server">server</span>' : ''}
+    ${String(F.status||'draft').toLowerCase()==='draft'
+        ? `<span class="badge text-bg-secondary ms-1">${F.status_label || computeRevisionTag(F.nomor||'')}</span>`
+        : ''}
+  </h4>
+  <div class="small text-muted">${ESTATE} · ${DIVISI}</div>
+</div>
 
       <div class="row g-3">
         <div class="col-sm-4">
           <label class="form-label">Periode</label>
           <div class="input-group">
-            <input id="periode" class="form-control" placeholder="Pilih periode..." value="${F.periode}" readonly />
+            <input id="periode" class="form-control" placeholder="Pilih periode..." value="${fPeriode(F.periode)}" readonly />
             <button class="btn btn-outline-secondary" id="btn-periode">Pilih</button>
           </div>
           <div class="form-text">Gunakan pemilih bulan agar tidak salah ketik.</div>
@@ -108,6 +212,14 @@ Pages.rkbForm = function(){
             <button class="btn btn-outline-secondary" id="btn-nomor">Buat</button>
           </div>
           <div class="form-text">Format: RKB{DIVISI}{yymmddhhmmss}</div>
+        </div>
+
+        <div class="col-sm-4">
+          <label class="form-label">New Form</label>
+          <div class="input-group">
+            <button id="btn-new" class="btn btn-danger">Buat RKB Baru</button>
+          </div>
+          <div class="form-text">Klik untuk membuat From RKB yang baru</div>
         </div>
       </div>
 
@@ -186,7 +298,6 @@ Pages.rkbForm = function(){
 
       <div class="d-flex gap-2">
         <button id="btn-save-draft" class="btn btn-success">Simpan Draft</button>
-        <!-- Tombol Sync dipindahkan ke halaman Draft per nomor -->
       </div>
     </div></div>`;
 
@@ -201,6 +312,13 @@ Pages.rkbForm = function(){
     U.qs('#btn-nomor').onclick = ()=>{
       F.nomor = `RKB${DIVISI}${U.fmt.yymmddhhmmss(new Date())}`; saveBuffer(); build();
     };
+
+    // tombol new
+U.qs('#btn-new').onclick = ()=>{
+  if(confirm('Bersihkan form dan mulai RKB baru? Seluruh isian saat ini akan direset.')){
+    resetFormToNew();
+  }
+};
 
     U.qs('#pekerjaan').oninput = (e)=>{
       CUR.pekerjaan = e.target.value;
@@ -269,9 +387,9 @@ Pages.rkbForm = function(){
     };
 
     div.querySelector('#ok').onclick = ()=>{
-      F.periode = inp.value || ym(now);
-      saveBuffer(); build(); m.hide(); setTimeout(()=>div.remove(), 300);
-    };
+  F.periode = fPeriode(inp.value || ym(now));
+  saveBuffer(); build(); m.hide(); setTimeout(()=>div.remove(), 300);
+};
     div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
   }
 
@@ -519,30 +637,75 @@ Pages.rkbForm = function(){
     });
   }
 
-  function saveDraft(){
-    const errH = validateHeader(); if(errH){ U.toast(errH,'warning'); return; }
-    if(!(F.items?.length)) { U.toast('Minimal 1 item pekerjaan.','warning'); return; }
-    const nowIso = new Date().toISOString();
-    // Simpan semua RKB ini ke local draft
-    const drafts = U.S.get('rkb.drafts', []);
-    const totalHK = (F.items||[]).reduce((a,it)=> a + (computeHK(it).total||0), 0);
-    const item = {
-      ...F,
-      divisi:DIVISI, estate_full:ESTATE, status:'draft',
-      hk_total: Number(totalHK.toFixed(2)),
-      created_at: F.created_at || nowIso,
-      updated_at: nowIso
-    };
-    const idx = drafts.findIndex(d=> d.nomor===F.nomor);
-    if(idx>=0) drafts[idx]=item; else drafts.unshift(item);
-    U.S.set('rkb.drafts', drafts);
-    U.toast('Draft RKB disimpan.','success');
-  }
+// === Reset total form: buffer bersih, nomor kosong, item kosong, tanpa flag server
+function resetFormToNew(){
+  CUR = defaultItem();
+  F = {
+    divisi: DIVISI,
+    divisi_id: DIVISI_ID,
+    estate_id: ESTATE_ID,
+    rayon_id:  RAYON_ID,
+    estate_full: ESTATE,
+    periode: '',   // biarkan user pilih lagi
+    nomor: '',
+    items: [],
+    status: 'draft',
+    status_label: 'draft',
+    __serverLinked: false,
+    created_at: undefined,
+    updated_at: undefined
+  };
+  saveBufferThin();
+  build();
+}
+
+
+function saveDraft(){
+  const errH = validateHeader(); if(errH){ U.toast(errH,'warning'); return; }
+  if(!(F.items?.length)) { U.toast('Minimal 1 item pekerjaan.','warning'); return; }
+
+  const nowIso = new Date().toISOString();
+  const drafts = U.S.get('rkb.drafts', []);
+  const totalHK = (F.items||[]).reduce((a,it)=> a + (computeHK(it).total||0), 0);
+
+  const item = {
+    ...F,
+
+    // label lama tetap sebagai display
+    divisi: DIVISI,
+    estate_full: ESTATE,
+
+    // === scope id dipastikan ikut tersimpan ===
+    divisi_id: F.divisi_id || DIVISI_ID,
+    estate_id: F.estate_id || ESTATE_ID,
+    rayon_id:  F.rayon_id  || RAYON_ID,
+
+    periode: fPeriode(F.periode),
+    status: 'draft',
+    status_label: computeRevisionTag(F.nomor),
+    hk_total: Number(totalHK.toFixed(2)),
+    created_at: F.created_at || nowIso,
+    updated_at: nowIso,
+
+    // pertahankan tanda server jika memang berasal dari server
+    __serverLinked: !!F.__serverLinked
+  };
+
+  const idx = drafts.findIndex(d=> d.nomor===F.nomor);
+  if(idx>=0) drafts[idx]=item; else drafts.unshift(item);
+  U.S.set('rkb.drafts', drafts);
+
+  // update buffer juga agar konsisten ketika kembali ke form
+  F = {...item};
+  saveBufferThin();
+
+  U.toast('Draft RKB disimpan.','success');
+}
 
   // default periode ke bulan ini jika kosong
-  if(!F.periode){
-    const d=new Date();
-    F.periode = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-  }
+if(!F.periode){
+  const d=new Date();
+  F.periode = fPeriode(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+}
   build();
 };

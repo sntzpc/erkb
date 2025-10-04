@@ -183,6 +183,17 @@ const DETAIL_HEADERS = [
     const BHB = base * ((Number(it.pct_bhb)||0)/100);
     return {BHL, SKU, BHB, total: (BHL+SKU+BHB)};
   }
+  // Hitung label revisi: "draft r1/r2/..." dari komentar Askep/Manager
+function computeRevisionTag(nomor){
+  try{
+    const comments = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_comments')||[]) : [];
+    const revs = comments.filter(c =>
+      String(c.nomor)===String(nomor) &&
+      (String(c.role||'').toLowerCase()==='askep' || String(c.role||'').toLowerCase()==='manager')
+    ).length;
+    return revs>0 ? `draft r${revs}` : 'draft';
+  }catch(_){ return 'draft'; }
+}
   function nomorToDate(n){
     const m = String(n||'').match(/(\d{12})$/); if(!m) return 0;
     const s = m[1];
@@ -267,6 +278,7 @@ function mergeUniqueByNomor(primaryArr, secondaryArr){
 let data = (which==='outbox')
   ? (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error)   // hanya yg gagal
   : mergeUniqueByNomor(readDraftsCompat(), readHistoryFromActuals());
+  data = (data||[]).map(r => ({ ...r, periode: fPeriode(r.periode) }));
 
   // ===== State UI =====
   let page=1, pageSize=20, q='', periodeFilter='';
@@ -284,21 +296,24 @@ let data = (which==='outbox')
   sortData(data);
 
   // ===== Filtering & Paging =====
-  function uniquePeriodes(arr){
-    return Array.from(new Set(arr.map(x=>String(x.periode||'').trim()).filter(Boolean))).sort().reverse();
+function uniquePeriodes(arr){
+  return Array.from(
+    new Set((arr||[]).map(x => fPeriode(x.periode)).filter(Boolean))
+  ).sort().reverse();
+}
+function applyFilter(){
+  let arr = (data||[]).slice();
+  if(periodeFilter) arr = arr.filter(x => fPeriode(x.periode) === String(periodeFilter));
+  const qq = q.trim().toLowerCase();
+  if(qq){
+    arr = arr.filter(r=>{
+      return [r.nomor, fPeriode(r.periode), r.divisi, r.estate_full, r.status]
+        .some(v=> String(v||'').toLowerCase().includes(qq));
+    });
   }
-  function applyFilter(){
-    let arr = data.slice();
-    if(periodeFilter) arr = arr.filter(x=> String(x.periode||'')===String(periodeFilter));
-    const qq=q.trim().toLowerCase();
-    if(qq){
-      arr = arr.filter(r=>{
-        return [r.nomor, r.periode, r.divisi, r.estate_full, r.status]
-          .some(v=> String(v||'').toLowerCase().includes(qq));
-      });
-    }
-    return sortData(arr);
-  }
+  return sortData(arr);
+}
+
   function pageCountOf(len){ return Math.max(1, Math.ceil(len/pageSize)); }
   function getPageSlice(arr){
     const pc = pageCountOf(arr.length);
@@ -307,128 +322,293 @@ let data = (which==='outbox')
     return arr.slice(s, s+pageSize);
   }
 
+
+// === Helper: cari penandatangan dari master (idaman: estate/divisi/rayon lengkap)
+async function resolveSignersByContext(ctx = {}){
+  // ctx: { estate_id?, rayon_id?, divisi_id?, divisi?, estate_full? }
+  try{
+    if (typeof STORE?.ensureWarm === 'function') {
+      await STORE.ensureWarm();
+    }
+    const getM = STORE?.getMaster?.bind(STORE) || (()=>[]);
+    const estates  = getM('yestate')  || [];   // manager: kolom nama_mgr
+    const rayons   = getM('yrayon')   || [];   // askep  : kolom nama_askep
+    const divisis  = getM('ydivisi')  || [];   // asisten: kolom nama_asisten
+    const orgMap   = getM('yorg_map') || [];   // fallback tambahan bila perlu
+    const signersT = getM('ysigners') || getM('yorg_signers') || []; // fallback tambahan
+
+    const prof = (typeof SESSION?.profile === 'function') ? (SESSION.profile() || {}) : {};
+
+    // --- Helpers kecil
+    const LC = v => v==null ? '' : String(v).toLowerCase();
+    const eqLoose = (a,b)=> LC(a) === LC(b);
+
+    // --- 1) Temukan estateId
+    let estateId =
+      ctx.estate_id
+      || (estates.find(e => (e.nama_panjang||e.nama) === ctx.estate_full)?.id)
+      || prof.estate_id;
+
+    const estateRow = estates.find(e =>
+      eqLoose(e.id, estateId) || eqLoose(e.kode, estateId) || eqLoose(e.kd_estate, estateId)
+    ) || {};
+
+    // --- 2) Temukan divisiId (boleh berupa id/kode/nama)
+    function guessDivisiId(label){
+      if(!label) return null;
+      const L = LC(label);
+      const row = divisis.find(d =>
+         eqLoose(d.id, label) || eqLoose(d.divisi_id, label)
+      || eqLoose(d.kode, label) || eqLoose(d.kd_divisi, label)
+      || LC(d.nama||d.nama_divisi) === L
+      );
+      return row?.id || row?.divisi_id || null;
+    }
+
+    let divisiId =
+      ctx.divisi_id
+      || guessDivisiId(ctx.divisi)
+      || prof.divisi_id
+      || prof.divisi;
+
+    const divRow = divisis.find(d =>
+      eqLoose(d.id, divisiId) || eqLoose(d.divisi_id, divisiId)
+      || eqLoose(d.kode, divisiId) || eqLoose(d.kd_divisi, divisiId)
+      || LC(d.nama||d.nama_divisi) === LC(divisiId)
+    ) || {};
+
+    // --- 3) Temukan rayonId dari beberapa jalur:
+    // ctx.rayon_id → d.rayon_id → estate.rayon_id → profile.rayon_id
+    let rayonId =
+      ctx.rayon_id
+      || divRow.rayon_id
+      || estateRow.rayon_id
+      || prof.rayon_id;
+
+    // kalau masih kosong, coba tebak dari kemungkinan kolom kode di divisi/estate
+    if(!rayonId){
+      const candidates = [
+        divRow.rayon, divRow.kd_rayon, divRow.kode_rayon,
+        estateRow.kd_rayon, estateRow.kode_rayon,
+      ].filter(Boolean);
+
+      for(const c of candidates){
+        const r = rayons.find(x =>
+          eqLoose(x.id, c) || eqLoose(x.rayon_id, c)
+          || eqLoose(x.kode, c) || eqLoose(x.kd_rayon, c)
+          || LC(x.nama||x.nama_rayon) === LC(c)
+        );
+        if(r){ rayonId = r.id || r.rayon_id || r.kode || r.kd_rayon; break; }
+      }
+    }
+
+    // --- 4) Ambil nama berdasarkan master yang Anda sebut:
+    const manager = estateRow.nama_mgr || '';
+
+    const rayonRow = rayons.find(r =>
+      eqLoose(r.id, rayonId) || eqLoose(r.rayon_id, rayonId)
+      || eqLoose(r.kode, rayonId) || eqLoose(r.kd_rayon, rayonId)
+    ) || {};
+
+    let askep   = rayonRow.nama_askep || '';
+    let asisten = divRow.nama_asisten || '';
+
+    // --- 5) Fallback bila masih kosong: ysigners / yorg_map
+    if(!(manager && askep && asisten)){
+      const pool = (signersT.length ? signersT : orgMap).filter(r=>{
+        const okE = !estateId || eqLoose(r.estate_id, estateId);
+        const okR = !rayonId  || eqLoose(r.rayon_id,  rayonId);
+        const okD = !divisiId || LC(r.divisi_id||r.divisi) === LC(divisiId);
+        return okE && okR && okD;
+      });
+      const pick = (role) => {
+        const tgt = LC(role);
+        return pool.find(x=>{
+          const jr = LC(x.role||x.jabatan||'');
+          const nj = LC(x.nama_jabatan||'');
+          return jr.includes(tgt) || nj.includes(tgt);
+        });
+      };
+      if(!askep){
+        askep   = pick('askep')?.nama_lengkap || pick('askep')?.nama || askep;
+      }
+      if(!asisten){
+        asisten = pick('asisten')?.nama_lengkap || pick('asisten')?.nama || asisten;
+      }
+    }
+
+    return { asisten: asisten || '', askep: askep || '', manager: manager || '' };
+  }catch(_){
+    return { asisten:'', askep:'', manager:'' };
+  }
+}
+
+function signerLine(name){
+  return `(${name && String(name).trim() ? String(name).trim() : '........................'})`;
+}
+
+
+
+
   // konversi index kolom (0-based) ke huruf Excel (A, B, ..., AA, AB, ...)
 function colLetter(n){
   let s=''; n = n + 1;
   while(n>0){ let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
   return s;
 }
-  // ===== Export XLSX (per-periode) =====
-  async function exportXlsx(){
+
+// ===== Export XLSX (per-periode) =====
+async function exportXlsx(){
   await resolveCompanyName();
-  if(typeof XLSX==='undefined'){ U.toast('Library XLSX belum tersedia.','warning'); return; }
+  if (typeof XLSX === 'undefined'){ U.toast('Library XLSX belum tersedia.','warning'); return; }
+
   const arr = applyFilter();
-  if(!arr.length){ U.toast('Tidak ada data untuk diekspor.','warning'); return; }
+  if (!arr.length){ U.toast('Tidak ada data untuk diekspor.','warning'); return; }
 
   const wb = XLSX.utils.book_new();
 
-  arr.forEach((r,idx)=>{
-    const rows = flattenRkbRows(r);
+  // gunakan loop biasa agar bisa await
+  for (let idx = 0; idx < arr.length; idx++) {
+    const r = arr[idx];
+
+    // ambil nama penandatangan dari master
+    const sign = await resolveSignersByContext({
+      estate_id:   r.estate_id,
+      rayon_id  : r.rayon_id,
+      divisi_id:   r.divisi_id,
+      divisi:      r.divisi,
+      estate_full: r.estate_full
+    });
+
+    // inflate items dari actuals jika kosong (kasus RKB server/history)
+    const items = (Array.isArray(r.items) && r.items.length)
+      ? r.items
+      : (typeof itemsFromActuals === 'function' ? itemsFromActuals(r.nomor) : []);
+
+    // susun rows via flattenRkbRows menggunakan items hasil inflate
+    const rowsAoa = flattenRkbRows({ ...r, items });
 
     // Header blok (4 baris)
     const headerBlock = [
       [COMPANY_NAME],
       [r.estate_full || ''],
       ['RENCANA KERJA BULANAN'],
-      [`Periode: ${r.periode||'-'}`, `Divisi: ${r.divisi||'-'}`, `No RKB: ${r.nomor||'-'}`],
+      [`Periode: ${fPeriode(r.periode)||'-'}`, `Divisi: ${r.divisi||'-'}`, `No RKB: ${r.nomor||'-'}`],
       [], // spasi
       DETAIL_HEADERS
     ];
 
     // Gabung header + detail
-    const detailData = rows.map(obj => DETAIL_HEADERS.map(h=> obj[h]));
+    const detailData = rowsAoa.map(obj => DETAIL_HEADERS.map(h => obj[h]));
     const aoa = headerBlock.concat(detailData);
 
-    // Tambahkan baris persetujuan (kosong untuk ditandatangani)
+    // Baris persetujuan pakai nama dari master (fallback titik-titik)
     aoa.push([]);
     aoa.push(['Asisten','','','Askep','','','Manager']);
-    aoa.push(['(........................)','', '', '(........................)','', '', '(........................)']);
+    aoa.push([
+      signerLine(sign.asisten), '', '',
+      signerLine(sign.askep),   '', '',
+      signerLine(sign.manager)
+    ]);
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-    // --- WRAP TEXT untuk kolom dengan newline ---
-const WRAP_HEADERS = ['Lokasi','No. Material','Nama Bahan','Sat. Bahan']; // tambahkan jika perlu
-const wrapColIdx = WRAP_HEADERS.map(h => DETAIL_HEADERS.indexOf(h)).filter(i => i >= 0);
+    // --- WRAP TEXT untuk kolom yang berisi newline ---
+    const WRAP_HEADERS = ['Lokasi','No. Material','Nama Bahan','Sat. Bahan'];
+    const wrapColIdx = WRAP_HEADERS.map(h => DETAIL_HEADERS.indexOf(h)).filter(i => i >= 0);
 
-// baris data mulai setelah headerBlock (yang memuat judul + header kolom)
-const dataStartRow = headerBlock.length + 1; // 1-based row index di Excel
-const dataEndRow   = dataStartRow + (detailData.length || 0) - 1;
+    // baris data mulai setelah headerBlock (yang memuat judul + header kolom)
+    const dataStartRow = headerBlock.length + 1; // 1-based row index di Excel
+    const dataEndRow   = dataStartRow + (detailData.length || 0) - 1;
 
-for(const ci of wrapColIdx){
-  const col = colLetter(ci);
-  for(let rrow = dataStartRow; rrow <= dataEndRow; rrow++){
-    const addr = `${col}${rrow}`;
-    if(ws[addr]){
-      ws[addr].t = 's'; // pastikan sebagai string
-      ws[addr].s = Object.assign({}, ws[addr].s || {}, { alignment:{ wrapText:true, vertical:'top' } });
+    for (const ci of wrapColIdx) {
+      const col = colLetter(ci);
+      for (let rrow = dataStartRow; rrow <= dataEndRow; rrow++) {
+        const addr = `${col}${rrow}`;
+        if (ws[addr]) {
+          ws[addr].t = 's';
+          ws[addr].s = Object.assign({}, ws[addr].s || {}, { alignment:{ wrapText:true, vertical:'top' } });
+        }
+      }
     }
-  }
-}
 
-// (opsional) beri tinggi baris lebih besar supaya nyaman
-if(!ws['!rows']) ws['!rows'] = [];
-for(let rrow = dataStartRow-1; rrow <= dataEndRow-1; rrow++){
-  ws['!rows'][rrow] = Object.assign({}, ws['!rows'][rrow] || {}, { hpt: 18 }); // ~18pt
-}
+    // (opsional) tinggi baris nyaman
+    if (!ws['!rows']) ws['!rows'] = [];
+    for (let rrow = dataStartRow-1; rrow <= dataEndRow-1; rrow++) {
+      ws['!rows'][rrow] = Object.assign({}, ws['!rows'][rrow] || {}, { hpt: 18 });
+    }
 
-    // Lebar kolom agar nyaman dibaca
+    // Lebar kolom
     ws['!cols'] = [
       {wch:18},{wch:28},{wch:26},{wch:14},{wch:10},{wch:10},
       {wch:12},{wch:12},{wch:12},{wch:14},{wch:28},{wch:10},{wch:12},{wch:20}
     ];
 
-    // Nama sheet maksimal 31 karakter → gunakan nomor atau ringkas
+    // Nama sheet
     let sname = (r.nomor || `RKB${idx+1}`).replace(/[\\/?*\[\]]/g,'');
-    if(sname.length>31) sname = sname.slice(-31);
-    XLSX.utils.book_append_sheet(wb, ws, sname||`RKB${idx+1}`);
-  });
+    if (sname.length > 31) sname = sname.slice(-31);
+    XLSX.utils.book_append_sheet(wb, ws, sname || `RKB${idx+1}`);
+  }
 
   const label = periodeFilter || 'ALL';
   XLSX.writeFile(wb, `RKB_Detail_${label}.xlsx`);
 }
 
-function htmlBR(s){
-  if(s==null) return '';
-  return String(s)
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/\n/g,'<br/>');
-}
-  // ===== Cetak PDF (per-periode) =====
-  async function printPdf(){
+
+// ===== Cetak PDF (per-periode) =====
+async function printPdf(){
   await resolveCompanyName();
   const arr = applyFilter();
   if(!arr.length){ U.toast('Tidak ada data untuk dicetak.','warning'); return; }
 
-  const sections = arr.map((r, idx)=>{
-    const rows = flattenRkbRows(r).map(obj=>`
-  <tr>
-    <td>${obj['Activity Type']}</td>
-    <td>${obj['Jenis Pekerjaan']}</td>
-    <td>${htmlBR(obj['Lokasi'])}</td>
-    <td class="t-right">${obj['Volume Kerja']}</td>
-    <td>${obj['Satuan']}</td>
-    <td class="t-right">${obj['HK/Unit']}</td>
-    <td class="t-right">${obj['BHL']}</td>
-    <td class="t-right">${obj['SKU']}</td>
-    <td class="t-right">${obj['BHB']}</td>
-    <td>${htmlBR(obj['No. Material'])}</td>
-    <td>${htmlBR(obj['Nama Bahan'])}</td>
-    <td class="t-right">${htmlBR(obj['Jumlah'])}</td>
-    <td>${htmlBR(obj['Sat. Bahan'])}</td>
-    <td>${obj['Nama Pengawas']}</td>
-  </tr>
-`).join('');
+  const sections = await Promise.all(arr.map(async (r) => {
+  // nama penandatangan
+  const sign = await resolveSignersByContext({
+    estate_id:   r.estate_id,
+    rayon_id:    r.rayon_id,
+    divisi_id:   r.divisi_id,
+    divisi:      r.divisi,
+    estate_full: r.estate_full
+  });
 
-    return `
+  // inflate items dari actuals bila kosong
+  const items = (Array.isArray(r.items) && r.items.length)
+    ? r.items
+    : (typeof itemsFromActuals === 'function' ? itemsFromActuals(r.nomor) : []);
+
+  // kolom "Jumlah" multiline → format angka per baris
+  const fmtJumlah = (s) => String(s ?? '')
+    .split('\n')
+    .map(t => t.trim() ? U.fmt.id0(t) : '')
+    .join('\n');
+
+  const rows = flattenRkbRows({ ...r, items }).map(obj => `
+    <tr>
+      <td>${obj['Activity Type']}</td>
+      <td>${obj['Jenis Pekerjaan']}</td>
+      <td>${U.htmlBR(obj['Lokasi'])}</td>
+      <td class="t-right">${U.fmt.id2(obj['Volume Kerja'])}</td>
+      <td>${obj['Satuan']}</td>
+      <td class="t-right">${U.fmt.id2(obj['HK/Unit'])}</td>
+      <td class="t-right">${U.fmt.id2(obj['BHL'])}</td>
+      <td class="t-right">${U.fmt.id2(obj['SKU'])}</td>
+      <td class="t-right">${U.fmt.id2(obj['BHB'])}</td>
+      <td>${U.htmlBR(obj['No. Material'])}</td>
+      <td>${U.htmlBR(obj['Nama Bahan'])}</td>
+      <td class="t-right">${U.htmlBR(fmtJumlah(obj['Jumlah']))}</td>
+      <td>${U.htmlBR(obj['Sat. Bahan'])}</td>
+      <td>${obj['Nama Pengawas']}</td>
+    </tr>
+  `).join('');
+
+  return `
     <section class="page">
       <h2 class="company">${COMPANY_NAME}</h2>
       <div class="estate">${r.estate_full||''}</div>
       <h3 class="title">RENCANA KERJA BULANAN</h3>
 
       <div class="meta">
-        <div><b>Periode</b>: ${r.periode||'-'}</div>
+        <div><b>Periode</b>: ${fPeriode(r.periode)||'-'}</div>
         <div><b>Divisi</b>: ${r.divisi||'-'}</div>
         <div><b>No RKB</b>: ${r.nomor||'-'}</div>
       </div>
@@ -446,15 +626,16 @@ function htmlBR(s){
         <tbody>${rows || `<tr><td colspan="14" class="muted">Tidak ada detail.</td></tr>`}</tbody>
       </table>
 
-      <div class="signs">
-        <div>Asisten<br/><br/><br/>(........................)</div>
-        <div>Askep<br/><br/><br/>(........................)</div>
-        <div>Manager<br/><br/><br/>(........................)</div>
-      </div>
+        <div class="signs">
+    <div>Asisten<br/><br/><br/>${signerLine(sign.asisten)}</div>
+    <div>Askep<br/><br/><br/>${signerLine(sign.askep)}</div>
+    <div>Manager<br/><br/><br/>${signerLine(sign.manager)}</div>
+  </div>
 
       <div class="printed">Dicetak: ${new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta', dateStyle:'medium', timeStyle:'short'}).format(new Date())}</div>
     </section>`;
-  }).join('\n');
+}));
+
 
   const html = `
 <!doctype html><html><head><meta charset="utf-8"/>
@@ -476,11 +657,13 @@ function htmlBR(s){
   .printed{ margin-top:8px; color:#666; font-size:10px; }
 </style></head>
 <body>
-${sections}
+${sections.join('\n')}
 <script>window.print();</script>
 </body></html>`;
   const w = window.open('', '_blank'); w.document.write(html); w.document.close();
 }
+
+
 
   // ===== Copy RKB dari periode → periode lain =====
   function copyPeriode(){
@@ -492,7 +675,7 @@ ${sections}
 
     // ambil sumber di SEMUA draft (bukan outbox)
     const allDrafts = U.S.get(draftKey, []);
-    const srcRows = (allDrafts||[]).filter(x=> String(x.periode||'')===String(src));
+    const srcRows = (allDrafts||[]).filter(x => fPeriode(x.periode) === String(src));
     if(!srcRows.length){ U.toast('Tidak ada RKB dengan periode sumber.','warning'); return; }
 
     // klon → reset nomor & status
@@ -629,36 +812,49 @@ tb.innerHTML = slice.map((r,idx)=>{
   const i = (page-1)*pageSize + idx;
 
   const isDraft   = String(r.status||'draft').toLowerCase()==='draft';
-  const isHistory = !!r.__history;           // ← dari server (read-only)
+  const isHistory = !!r.__history;
   const canEdit   = which==='draft' && isDraft && !isHistory;
   const canSync   = which==='draft' && isDraft && !isHistory && (r.items||[]).length>0;
   const canDelete = which==='draft' && isDraft && !isHistory && !r.__serverLinked;
 
-  const sBadge = String(r.status||'draft');
+  // label draft rN
+  const sBadgeRaw = String(r.status||'draft');
+  const isDraftStatus = sBadgeRaw.toLowerCase()==='draft';
+  const comments = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_comments')||[]) : [];
+  const revCount = isDraftStatus
+    ? comments.filter(c =>
+        String(c.nomor)===String(r.nomor) &&
+        (String(c.role||'').toLowerCase()==='askep' || String(c.role||'').toLowerCase()==='manager')
+      ).length
+    : 0;
+  const sBadge = isDraftStatus ? (revCount>0 ? `draft r${revCount}` : 'draft') : sBadgeRaw;
+
   const badgeCls =
-    sBadge==='submitted' ? 'text-bg-warning' :
-    sBadge==='askep_approved' ? 'text-bg-info' :
-    sBadge==='full_approved' ? 'text-bg-success' :
+    sBadgeRaw==='submitted' ? 'text-bg-warning' :
+    sBadgeRaw==='askep_approved' ? 'text-bg-info' :
+    sBadgeRaw==='full_approved' ? 'text-bg-success' :
     'text-bg-secondary';
 
-    // badge kecil penanda riwayat (read-only)
   const histBadge = r.__history
-  ? '<span class="badge bg-light text-dark border ms-1" title="Rewayat dari server (read-only)">Server</span>'
-  : '';
+    ? '<span class="badge bg-light text-dark border ms-1" title="Riwayat dari server (read-only)">Server</span>'
+    : '';
 
   const btn = (name, title, action, enabled=true)=>{
     const dis = enabled ? '' : 'disabled';
-    return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-i="${i}" ${dis}>
-              <span class="i i-${name}">${ICON[name]}</span>
-            </button>`;
+  return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-i="${i}" data-nomor="${r.nomor}" ${dis}>
+            <span class="i i-${name}">${ICON[name]}</span>
+          </button>`;
   };
+
+  // >>> format HK: ribuan + 2 desimal
+  const hkStr = U.fmt.id2(hk);
 
   return `<tr>
     <td>${i+1}</td>
     <td>${r.nomor}</td>
-    <td>${r.periode||'-'}</td>
+    <td>${fPeriode(r.periode) || '-'}</td>
     <td>${r.divisi||'-'}</td>
-    <td>${hk.toFixed(2)}</td>
+    <td>${hkStr}</td>
     <td><span class="badge ${badgeCls}">${sBadge}</span>${histBadge}</td>
     ${which==='outbox' ? `<td class="hide-sm">${r.last_error||''}</td>` : ''}
     <td>
@@ -668,15 +864,16 @@ tb.innerHTML = slice.map((r,idx)=>{
         ${btn('del','Hapus','del',   canDelete)}
         ${which==='draft'
           ? btn('sync','Kirim/Sync ke server','sync', canSync)
-          : `<button class="btn btn-outline-success icon-btn" title="Kirim Ulang" data-a="resend" data-i="${i}">
-               <span class="i">⟳</span>
-             </button>`
+      : `<button class="btn btn-outline-success icon-btn" title="Kirim Ulang" data-a="resend" data-i="${i}" data-nomor="${r.nomor}">
+     <span class="i">⟳</span>
+      </button>`
         }
         ${btn('refresh','Perbarui Status','refresh', true)}
       </div>
     </td>
   </tr>`;
 }).join('');
+
 
     // Bind actions
     tb.querySelectorAll('button').forEach(btn=>{
@@ -722,136 +919,172 @@ tb.innerHTML = slice.map((r,idx)=>{
   }
 
   // ===== Action handlers =====
-  async function handleAction(a, i){
-    const listKey = which==='outbox' ? outboxKey : draftKey;
-    const arr = which==='outbox'
-      ? (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error)
-      : (U.S.get(draftKey, [])||[]);
-    const idx = i; // index relatif ke data (sudah dipetakan saat render)
-    const row = (which==='outbox') ? data[idx] : arr[idx];
+async function handleAction(a, i){
+  // Ambil nomor dari tombol yang ditekan (dibuat di renderRows)
+  const btnEl = document.querySelector(`button[data-a="${a}"][data-i="${i}"]`);
+  const nomor = btnEl?.dataset?.nomor || '';
 
-    if(a==='del'){
-  if (row && row.__history){
-    U.toast('Ini riwayat dari server dan tidak bisa dihapus.', 'warning');
+  const listKey = which==='outbox' ? outboxKey : draftKey;
+  // List "mentah" sesuai tab
+  const rawList = which==='outbox'
+    ? (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error)
+    : (U.S.get(draftKey, [])||[]);
+
+  // Sumber yang sedang tampil (sudah terfilter & tersortir)
+  const currentList = applyFilter();
+
+  // Cari baris berdasar nomor (prioritas: yang sedang tampil → rawList → data gabungan)
+  let rowRaw = currentList.find(x => String(x.nomor)===String(nomor))
+           || rawList.find(x => String(x.nomor)===String(nomor))
+           || data.find(x => String(x.nomor)===String(nomor));
+
+  if(!rowRaw){
+    U.toast('RKB tidak ditemukan di memori lokal. Coba perbarui/refresh data.', 'warning');
     return;
   }
-  if (row && row.__serverLinked){
-    U.toast('RKB revisi dari server tidak bisa dihapus. Silakan edit lalu Sync.', 'warning');
+
+  // Index baris di list yang akan dimodifikasi (bisa -1 jika berasal dari history server)
+  const idx = rawList.findIndex(x => String(x.nomor)===String(rowRaw.nomor));
+
+  // === Aksi ===
+  if(a==='del'){
+    if (rowRaw.__history){
+      U.toast('Ini riwayat dari server dan tidak bisa dihapus.', 'warning');
+      return;
+    }
+    if (rowRaw.__serverLinked){
+      U.toast('RKB revisi dari server tidak bisa dihapus. Silakan edit lalu Sync.', 'warning');
+      return;
+    }
+    if(!confirm('Hapus RKB ini dari daftar?')) return;
+
+    if(idx>=0){
+      rawList.splice(idx,1);
+      U.S.set(listKey, rawList);
+    }
+    data = (which==='outbox') ? rawList.filter(x=>!!x.last_error) : rawList;
+    sortData(data); renderRows(); renderPager();
     return;
   }
-  if(!confirm('Hapus RKB ini dari daftar?')) return;
-  arr.splice(idx,1);
-  U.S.set(listKey, arr);
-  data = (which==='outbox') ? arr.filter(x=>!!x.last_error) : arr;
-  sortData(data); renderRows(); renderPager();
-  return;
-}
 
-if(a==='edit'){
-      U.S.set('rkb.form.buffer', row);
-      location.hash = '#/rkb/form';
+  if(a==='edit'){
+    // Kirim baris apapun (draft/history). UI sebelumnya sudah membatasi tombol Edit untuk case allowed.
+    U.S.set('rkb.form.buffer', rowRaw);
+    location.hash = '#/rkb/form';
+    return;
+  }
+
+  if(a==='view'){
+    openViewModal(rowRaw);
+    return;
+  }
+
+  if(a==='sync'){
+    if(!(rowRaw.items && rowRaw.items.length)){
+      U.toast('Draft belum punya item.', 'warning');
       return;
     }
-
-    if(a==='view'){
-      openViewModal(row);
-      return;
-    }
-
-    if(a==='sync'){
-      if(!(row.items && row.items.length)){ U.toast('Draft belum punya item.','warning'); return; }
-      try{
-        U.progressOpen('Sinkronisasi RKB...'); U.progress(30,'Kirim ke server');
-        const payload = { row: { nomor:row.nomor, periode:row.periode, divisi:row.divisi, estate_full:row.estate_full }, items: row.items };
-        const r = await API.call('pushRKB', payload);
-        if(r.ok){
-          // sukses → update status, hapus error di outbox bila ada
-          arr[idx].status='submitted';
-          arr[idx].updated_at=new Date().toISOString();
-          U.S.set(draftKey, arr);
-          // bersihkan dari outbox jika pernah gagal
-          const ob = U.S.get(outboxKey, []);
-          const j = ob.findIndex(x=> x.nomor===row.nomor);
-          if(j>=0){ ob.splice(j,1); U.S.set(outboxKey, ob); }
-          U.toast('Berhasil sync.','success');
-        }else{
-          // gagal server → simpan ke outbox dengan alasan
-          saveToOutboxWithError(row, r.error||'Gagal sync');
-          U.toast(r.error||'Gagal sync. Tersimpan di Outbox.','danger');
+    try{
+      U.progressOpen('Sinkronisasi RKB...'); U.progress(30,'Kirim ke server');
+      const payload = {
+        row: {
+          nomor: rowRaw.nomor,
+          periode: fPeriode(rowRaw.periode),
+          divisi: rowRaw.divisi,
+          estate_full: rowRaw.estate_full
+        },
+        items: rowRaw.items
+      };
+      const r = await API.call('pushRKB', payload);
+      if(r.ok){
+        if(idx>=0){
+          rawList[idx].status = 'submitted';
+          rawList[idx].updated_at = new Date().toISOString();
+          U.S.set(draftKey, rawList);
         }
-      }catch(e){
-        // gagal jaringan → outbox
-        saveToOutboxWithError(row, e.message||'Jaringan gagal');
-        U.toast('Jaringan gagal. Disimpan di Outbox.','danger');
-      }finally{
-        U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250);
-        data = U.S.get(draftKey, []);
+        // bersihkan dari outbox bila sebelumnya pernah gagal
+        const ob = U.S.get(outboxKey, []);
+        const j = ob.findIndex(x=> String(x.nomor)===String(rowRaw.nomor));
+        if(j>=0){ ob.splice(j,1); U.S.set(outboxKey, ob); }
+        U.toast('Berhasil sync.','success');
+      }else{
+        saveToOutboxWithError(rowRaw, r.error||'Gagal sync');
+        U.toast(r.error||'Gagal sync. Tersimpan di Outbox.','danger');
+      }
+    }catch(e){
+      saveToOutboxWithError(rowRaw, e.message||'Jaringan gagal');
+      U.toast('Jaringan gagal. Disimpan di Outbox.','danger');
+    }finally{
+      U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250);
+      data = U.S.get(draftKey, []);
+      sortData(data); renderRows(); renderPager();
+    }
+    return;
+  }
+
+  if(a==='resend' && which==='outbox'){
+    try{
+      U.progressOpen('Kirim ulang...'); U.progress(35,'Kirim');
+      const payload = (rowRaw.items && rowRaw.items.length)
+        ? { row: { nomor: rowRaw.nomor, periode: fPeriode(rowRaw.periode), divisi: rowRaw.divisi, estate_full: rowRaw.estate_full }, items: rowRaw.items }
+        : { row: { ...rowRaw, periode: fPeriode(rowRaw.periode) } };
+      const r = await API.call('pushRKB', payload);
+      if(r.ok){
+        const all = U.S.get(outboxKey, []);
+        const j = all.findIndex(x=> String(x.nomor)===String(rowRaw.nomor));
+        if(j>=0){ all.splice(j,1); U.S.set(outboxKey, all); }
+        U.toast('Terkirim. Item dihapus dari Outbox.','success');
+        data = (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error);
         sortData(data); renderRows(); renderPager();
+      }else{
+        U.toast(r.error||'Gagal kirim ulang.','danger');
       }
-      return;
+    }catch(e){
+      U.toast(e.message||'Gagal kirim ulang.','danger');
+    }finally{
+      U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250);
     }
+    return;
+  }
 
-    if(a==='resend' && which==='outbox'){
-      try{
-        U.progressOpen('Kirim ulang...'); U.progress(35,'Kirim');
-        const payload = row.items && row.items.length
-          ? { row: {nomor:row.nomor, periode:row.periode, divisi:row.divisi, estate_full:row.estate_full}, items: row.items }
-          : { row };
-        const r = await API.call('pushRKB', payload);
-        if(r.ok){
-          // sukses → hapus error & update waktu
-          const all = U.S.get(outboxKey, []);
-          const j = all.findIndex(x=> x.nomor===row.nomor);
-          if(j>=0){ all.splice(j,1); U.S.set(outboxKey, all); }
-          U.toast('Terkirim. Item dihapus dari Outbox.','success');
-          data = (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error);
-          sortData(data); renderRows(); renderPager();
-        }else{
-          U.toast(r.error||'Gagal kirim ulang.','danger');
-        }
-      }catch(e){
-        U.toast(e.message||'Gagal kirim ulang.','danger');
-      }finally{
-        U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250);
-      }
-      return;
-    }
-
-    if(a==='refresh'){
-      try{
-        U.progressOpen('Perbarui status...'); U.progress(30,'Ambil status');
-        const r = await API.call('pullMaster', {});
-        if(r.ok && r.actuals?.rkb){
-          const found = (r.actuals.rkb||[]).find(x=> String(x.nomor)===String(row.nomor));
-          if(found){
-            if(which==='outbox'){
-              // kalau sudah berhasil di server, hapus dari outbox
-              if(String(found.status||'').toLowerCase()!=='draft'){
-                const all = U.S.get(outboxKey, []);
-                const j = all.findIndex(x=> x.nomor===row.nomor);
-                if(j>=0){ all.splice(j,1); U.S.set(outboxKey, all); }
-                data = (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error);
-              }
-            }else{
-              arr[idx].status = found.status || arr[idx].status;
-              arr[idx].updated_at = new Date().toISOString();
-              U.S.set(draftKey, arr);
+  if(a==='refresh'){
+    try{
+      U.progressOpen('Perbarui status...'); U.progress(30,'Ambil status');
+      const r = await API.call('pullMaster', {});
+      if(r.ok && r.actuals?.rkb){
+        const found = (r.actuals.rkb||[]).find(x=> String(x.nomor)===String(rowRaw.nomor));
+        if(found){
+          if(which==='outbox'){
+            // kalau sudah bukan draft di server → hapus dari outbox
+            if(String(found.status||'').toLowerCase()!=='draft'){
+              const all = U.S.get(outboxKey, []);
+              const j = all.findIndex(x=> String(x.nomor)===String(rowRaw.nomor));
+              if(j>=0){ all.splice(j,1); U.S.set(outboxKey, all); }
+              data = (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error);
+            }
+          }else{
+            if(idx>=0){
+              rawList[idx].status = found.status || rawList[idx].status;
+              rawList[idx].updated_at = new Date().toISOString();
+              U.S.set(draftKey, rawList);
               data = U.S.get(draftKey, []);
             }
-            sortData(data); renderRows(); renderPager();
-            U.toast('Status diperbarui.','info');
-          }else{
-            U.toast('Nomor tidak ditemukan di server untuk scope Anda.','warning');
           }
+          sortData(data); renderRows(); renderPager();
+          U.toast('Status diperbarui.','info');
         }else{
-          U.toast('Gagal ambil status.','danger');
+          U.toast('Nomor tidak ditemukan di server untuk scope Anda.','warning');
         }
-      }finally{
-        U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 200);
+      }else{
+        U.toast('Gagal ambil status.','danger');
       }
-      return;
+    }finally{
+      U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 200);
     }
+    return;
   }
+}
+
 
   function saveToOutboxWithError(item, msg){
     const ob = U.S.get(outboxKey, []);
@@ -861,65 +1094,163 @@ if(a==='edit'){
     U.S.set(outboxKey, ob);
   }
 
-  // ===== Modal detail =====
-  function openViewModal(d){
-    const div=document.createElement('div');
-    div.className='modal fade'; div.innerHTML=`
-    <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Detail RKB · ${d.nomor||'-'}</h5>
-        <button class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <div class="mb-2 small text-muted">
-          Periode: <b>${d.periode||'-'}</b> · Divisi: <b>${d.divisi||'-'}</b> · Estate: <b>${d.estate_full||'-'}</b>
-        </div>
-        <div id="detail-items"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
-      </div>
-    </div></div>`;
-    document.body.appendChild(div);
-    const m=new bootstrap.Modal(div); m.show();
 
-    const wrap = div.querySelector('#detail-items');
-    const items = d.items||[];
-    if(!items.length){
-      wrap.innerHTML = `<div class="text-muted">Tidak ada item pekerjaan.</div>`;
-    }else{
-      const rows = items.map((it,idx)=>{
-        const hk=computeHK(it);
-        const bahan=(it.bahan||[]).map(b=>`${b.nama} (${b.jumlah} ${b.satuan||''})`).join(', ')||'-';
-        return `<tr>
-          <td>${idx+1}</td>
-          <td>${it.pekerjaan||''}</td>
-          <td>${(it.lokasi||[]).map(x=>x.name).join(', ')||'-'}</td>
-          <td>${it.volume||0} ${it.satuan||''}</td>
-          <td>${hk.BHL.toFixed(2)}</td>
-          <td>${hk.SKU.toFixed(2)}</td>
-          <td>${hk.BHB.toFixed(2)}</td>
-          <td>${hk.total.toFixed(2)}</td>
-          <td>${bahan}</td>
-          <td>${it.pengawas||''}</td>
-        </tr>`;
-      }).join('');
-      wrap.innerHTML = `
-        <div class="table-responsive">
-          <table class="table table-sm table-striped">
-            <thead>
-              <tr>
-                <th>No</th><th>Pekerjaan</th><th>Lokasi</th>
-                <th>Volume</th><th>HK BHL</th><th>HK SKU</th><th>HK BHB</th><th>HK Total</th>
-                <th>Bahan</th><th>Pengawas</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>`;
+  // === [NEW] Resolver nama key actuals yang dipakai backend
+let ACT_KEYS = { items: 'rkb_items', bahan: 'rkb_bahan' };
+
+async function resolveActualNames(){
+  try{
+    if (typeof STORE?.ensureWarm === 'function') {
+      await STORE.ensureWarm();
     }
-    div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
+    const tryKeysItems = ['rkb_items','rkb_item','rkb_detail_items','rkb_details','rkb_detail'];
+    const tryKeysBahan = ['rkb_bahan','rkb_material','rkb_bhn','rkb_bahan_items'];
+
+    for (const k of tryKeysItems){
+      const v = STORE.getActual(k);
+      if (Array.isArray(v) && v.length){ ACT_KEYS.items = k; break; }
+    }
+    for (const k of tryKeysBahan){
+      const v = STORE.getActual(k);
+      if (Array.isArray(v) && v.length){ ACT_KEYS.bahan = k; break; }
+    }
+  }catch(_){ /* biarkan default */ }
+}
+
+
+  // === Ambil detail item+bahan dari cache actuals untuk nomor tertentu
+async function itemsFromActuals(nomor){
+  try{
+    await resolveActualNames();
+
+    const itemsAll = (window.STORE && STORE.getActual) ? (STORE.getActual(ACT_KEYS.items) || []) : [];
+    const bahanAll = (window.STORE && STORE.getActual) ? (STORE.getActual(ACT_KEYS.bahan) || []) : [];
+
+    const rowsI = itemsAll.filter(i => String(i.nomor)===String(nomor));
+    if(!rowsI.length) return [];
+
+    const bahanByIdx = {};
+    bahanAll.filter(b => String(b.nomor)===String(nomor)).forEach(b=>{
+      const k = String(b.item_idx||'');
+      (bahanByIdx[k] = bahanByIdx[k] || []).push({
+        nama: b.nama || '',
+        jumlah: Number(b.jumlah||0),
+        satuan: b.satuan || ''
+      });
+    });
+
+    return rowsI.map(r=>{
+      const lokasiArr = (String(r.lokasi||'').split(',').map(s=>s.trim()).filter(Boolean) || [])
+        .map(nm => ({type:'', name:nm, luas:undefined}));
+      const it = {
+        pekerjaan: r.pekerjaan || '',
+        activity_type: r.activity_type || '',
+        lokasi: lokasiArr,
+        volume: Number(r.volume||0),
+        satuan: r.satuan || '',
+        hk_unit: Number(r.hk_unit||0),
+        pct_bhl: Number(r.pct_bhl||0),
+        pct_sku: Number(r.pct_sku||0),
+        pct_bhb: Number(r.pct_bhb||0),
+        bahan: bahanByIdx[String(r.idx||'')] || [],
+        pengawas: r.pengawas || ''
+      };
+      it.hk = computeHK(it);
+      return it;
+    });
+  }catch(_){ return []; }
+}
+
+
+  // ===== Modal detail =====
+  async function openViewModal(d){
+  const div=document.createElement('div');
+  div.className='modal fade'; div.innerHTML=`
+  <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title">Detail RKB · ${d.nomor||'-'}</h5>
+      <button class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+      <div class="mb-2 small text-muted">
+        Periode: <b>${fPeriode(d.periode)||'-'}</b> · Divisi: <b>${d.divisi||'-'}</b> · Estate: <b>${d.estate_full||'-'}</b>
+      </div>
+      <div id="detail-items"><div class="text-muted">Memuat detail...</div></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
+    </div>
+  </div></div>`;
+  document.body.appendChild(div);
+  const m=new bootstrap.Modal(div); m.show();
+
+  const wrap = div.querySelector('#detail-items');
+
+  // === [NEW] pastikan cache hangat & key actual ter-resolve
+  await resolveActualNames();
+
+  // Jika items kosong (riwayat server), inflate dari actuals
+  let items = Array.isArray(d.items) ? d.items : [];
+  if(!items.length){
+    items = await itemsFromActuals(d.nomor);
+    if(items.length){ d.items = items; }
   }
+
+  if(!items.length){
+    // Bantuan diagnostik kecil: tunjukkan key yang dipakai
+    wrap.innerHTML = `<div class="text-muted">
+      Tidak ada item pekerjaan di lokal.<br/>
+      Actuals digunakan: <code>${ACT_KEYS.items}</code> & <code>${ACT_KEYS.bahan}</code>.<br/>
+      Coba "Muat Ulang (Server)" di halaman Home/Settings untuk menyegarkan cache.
+    </div>`;
+    return;
+  }
+
+  const rows = items.map((it,idx)=>{
+    const hk = it.hk || computeHK(it);
+    const bahan = (it.bahan||[]).map(b=>`${b.nama} (${U.fmt.id0(b.jumlah)} ${b.satuan||''})`).join(', ') || '-';
+    return `<tr>
+      <td>${idx+1}</td>
+      <td>${it.pekerjaan||''}</td>
+      <td>${(it.lokasi||[]).map(x=>x.name).join(', ')||'-'}</td>
+      <td class="t-right">${it.volume||0} ${it.satuan||''}</td>
+      <td class="t-right">${U.fmt.id2(hk.BHL)}</td>
+      <td class="t-right">${U.fmt.id2(hk.SKU)}</td>
+      <td class="t-right">${U.fmt.id2(hk.BHB)}</td>
+      <td class="t-right">${U.fmt.id2(hk.total)}</td>
+      <td>${bahan}</td>
+      <td>${it.pengawas||''}</td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <div class="table-responsive">
+      <table class="table table-sm table-striped">
+        <thead>
+          <tr>
+            <th>No</th><th>Pekerjaan</th><th>Lokasi</th>
+            <th>Volume</th><th>HK BHL</th><th>HK SKU</th><th>HK BHB</th><th>HK Total</th>
+            <th>Bahan</th><th>Pengawas</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
+}
+
+  // Format periode ke YYYY-MM (zona Asia/Jakarta)
+function fPeriode(p){
+  if(!p) return '';
+  const s = String(p).trim();
+  if(/^\d{4}-\d{2}$/.test(s)) return s; // sudah OK
+  const d = new Date(s);
+  if(isNaN(d)) return s;                // bukan tanggal valid → tampilkan apa adanya
+  const tz = 'Asia/Jakarta';
+  const y = new Intl.DateTimeFormat('id-ID', { timeZone: tz, year: 'numeric' }).format(d);
+  const m = new Intl.DateTimeFormat('id-ID', { timeZone: tz, month: '2-digit' }).format(d);
+  return `${y}-${m}`;
+}
 
   // go
   build();

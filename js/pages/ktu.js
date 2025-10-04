@@ -21,63 +21,161 @@ Pages.ktu = function(){
   let masters = { ydivisi:[], yrayon:[], yestate:[] };
   let filters = { periode:'', divisi_id:'', rayon_id:'', estate_id:'' };
 
-  async function load(preferLocal=true){
-    try{
-       // masters
-      masters.ydivisi = STORE.getMaster('ydivisi')||[];
-      masters.yrayon  = STORE.getMaster('yrayon')||[];
-      masters.yestate = STORE.getMaster('yestate')||[];
+  // ---- Helper cari rayon dari berbagai jalur (id/kode/nama) ----
+function _lc(v){ return v==null ? '' : String(v).trim().toLowerCase(); }
+function _eq(a,b){ return _lc(a) === _lc(b); }
 
-      const actuals = STORE.getActualsRkb();
-      const rkbByNomor = Object.fromEntries((actuals||[]).map(r=>[String(r.nomor), r]));
-      const rayonById  = Object.fromEntries((masters.yrayon||[]).map(x=>[String(x.id), x]));
-      const estateById = Object.fromEntries((masters.yestate||[]).map(x=>[String(x.id), x]));
-      const divById    = Object.fromEntries((masters.ydivisi||[]).map(x=>[String(x.id), x]));
+function _findRayonByAny(val, rayons){
+  if(!val) return null;
+  return (rayons||[]).find(r =>
+    _eq(r.id, val) || _eq(r.rayon_id, val) ||
+    _eq(r.kode, val) || _eq(r.kd_rayon, val) || _eq(r.kode_rayon, val) ||
+    _lc(r.nama||r.nama_rayon) === _lc(val)
+  ) || null;
+}
 
-      let raw = [];
-      if(preferLocal){
-        const cached = getKtuCache();
-        if(Array.isArray(cached) && cached.length){
-          raw = cached;
-        }
-      }
-      if(!raw.length){
-        U.progressOpen('Tarik rekap bahan...'); U.progress(30,'Ambil data (server)');
-        const r = await API.call('ktuRekap', {});
-        if(!r.ok) throw new Error(r.error||'Gagal tarik');
-        raw = Array.isArray(r.items) ? r.items : [];
-        setKtuCache(raw); // cache-kan agar offline-ready
-      }
+function _findDivisiByAny(val, divisis){
+  if(!val) return null;
+  const v = _lc(val);
+  return (divisis||[]).find(d =>
+    _eq(d.id, val) || _eq(d.divisi_id, val) ||
+    _eq(d.kode, val) || _eq(d.kd_divisi, val) ||
+    _lc(d.nama||d.nama_divisi) === v
+  ) || null;
+}
 
-      items = raw.map(it=>{
-        const rkb = rkbByNomor[String(it.nomor)] || {};
-        const estate = estateById[String(rkb.estate_id||'')] || {};
-        const rayon  = rayonById[String(rkb.rayon_id||'')]   || {};
-        const div    = divById[String(rkb.divisi_id||'')]    || {};
-        return {
-          nomor: it.nomor,
-          periode: fPeriode(it.periode),
-          divisi: it.divisi||'',
-          pekerjaan: it.pekerjaan||'',
-          nama: it.nama,
-          jumlah: Number(it.jumlah||0),
-          satuan: it.satuan||'',
-          estate_id: String(rkb.estate_id||''),
-          estate_full: rkb.estate_full||estate.nama_panjang||estate.nama||'',
-          rayon_id: String(rkb.rayon_id||''),
-          rayon_nama: rayon.nama||'',
-          divisi_id: String(rkb.divisi_id||''),
-          divisi_nama: div.nama||it.divisi||''
-        };
-      });
+function _findEstateByAny(val, estates){
+  if(!val) return null;
+  const v = _lc(val);
+  return (estates||[]).find(e =>
+    _eq(e.id, val) || _eq(e.kode, val) || _eq(e.kd_estate, val) ||
+    _lc(e.nama_panjang||e.nama) === v
+  ) || null;
+}
 
-      render();
-    }catch(e){
-      root.innerHTML = `<div class="alert alert-danger">Gagal memuat: ${e.message||e}</div>`;
-    }finally{
-      U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350);
+/**
+ * Menentukan rayon dari konteks RKB + master.
+ * Urutan:
+ * 1) ctx.rayon_id langsung
+ * 2) ydivisi (via ctx.divisi_id ATAU ctx.divisi_label)
+ * 3) yestate (via ctx.estate_id ATAU ctx.estate_label)
+ * 4) (opsional) jika divisi punya kolom nama rayon
+ */
+function resolveRayonForContext(ctx, masters){
+  const { rayon_id, divisi_id, divisi_label, estate_id, estate_label } = ctx || {};
+  const rayons  = masters?.yrayon  || [];
+  const divisis = masters?.ydivisi || [];
+  const estates = masters?.yestate || [];
+
+  // 1) dari ctx.rayon_id
+  if(rayon_id){
+    const r = _findRayonByAny(rayon_id, rayons);
+    if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
+  }
+
+  // 2) dari ydivisi (id ataupun label/nama)
+  let drow = _findDivisiByAny(divisi_id, divisis);
+  if(!drow && divisi_label){ drow = _findDivisiByAny(divisi_label, divisis); }
+  if(drow){
+    // coba banyak kemungkinan kolom rayon di ydivisi
+    const cand = [drow.rayon_id, drow.kd_rayon, drow.kode_rayon, drow.rayon].filter(Boolean);
+    for(const c of cand){
+      const r = _findRayonByAny(c, rayons);
+      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
+    }
+    // kadang ada nama rayon di ydivisi
+    if(drow.nama_rayon || drow.rayon_nama){
+      const r = _findRayonByAny(drow.nama_rayon || drow.rayon_nama, rayons);
+      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
     }
   }
+
+  // 3) dari yestate (id ataupun label/nama)
+  let erow = _findEstateByAny(estate_id, estates);
+  if(!erow && estate_label){ erow = _findEstateByAny(estate_label, estates); }
+  if(erow){
+    const candE = [erow.rayon_id, erow.kd_rayon, erow.kode_rayon, erow.rayon].filter(Boolean);
+    for(const c of candE){
+      const r = _findRayonByAny(c, rayons);
+      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
+    }
+  }
+
+  // 4) gagal → kosong
+  return { rayon_id: '', rayon_nama: '' };
+}
+
+
+
+  async function load(preferLocal=true){
+  try{
+    // masters
+    masters.ydivisi = STORE.getMaster('ydivisi')||[];
+    masters.yrayon  = STORE.getMaster('yrayon')||[];
+    masters.yestate = STORE.getMaster('yestate')||[];
+
+    const actuals = STORE.getActualsRkb();
+    const rkbByNomor = Object.fromEntries((actuals||[]).map(r=>[String(r.nomor), r]));
+    const estateById = Object.fromEntries((masters.yestate||[]).map(x=>[String(x.id), x]));
+    const divById    = Object.fromEntries((masters.ydivisi||[]).map(x=>[String(x.id), x]));
+
+    let raw = [];
+    if(preferLocal){
+      const cached = getKtuCache();
+      if(Array.isArray(cached) && cached.length){
+        raw = cached;
+      }
+    }
+    if(!raw.length){
+      U.progressOpen('Tarik rekap bahan...'); U.progress(30,'Ambil data (server)');
+      const r = await API.call('ktuRekap', {});
+      if(!r.ok) throw new Error(r.error||'Gagal tarik');
+      raw = Array.isArray(r.items) ? r.items : [];
+      setKtuCache(raw); // cache-kan agar offline-ready
+    }
+
+    items = raw.map(it=>{
+  const rkb = rkbByNomor[String(it.nomor)] || {};
+  const estateRow = estateById[String(rkb.estate_id||'')] || {};
+  const divRow    = divById[String(rkb.divisi_id||'')]    || {};
+
+  // >>> Cari rayon secara robust (pakai id & label sebagai fallback)
+  const ray = resolveRayonForContext(
+    {
+      rayon_id:      rkb.rayon_id,
+      divisi_id:     rkb.divisi_id,
+      divisi_label:  it.divisi || rkb.divisi || divRow?.nama || divRow?.kode,
+      estate_id:     rkb.estate_id,
+      estate_label:  rkb.estate_full || estateRow?.nama_panjang || estateRow?.nama
+    },
+    masters
+  );
+
+  return {
+    nomor: it.nomor,
+    periode: fPeriode(it.periode),
+    divisi: it.divisi||'',
+    pekerjaan: it.pekerjaan||'',
+    nama: it.nama,
+    jumlah: Number(it.jumlah||0),
+    satuan: it.satuan||'',
+    estate_id: String(rkb.estate_id||''),
+    estate_full: rkb.estate_full || estateRow.nama_panjang || estateRow.nama || '',
+    rayon_id: String(ray.rayon_id||''),
+    rayon_nama: ray.rayon_nama || '',
+    divisi_id: String(rkb.divisi_id||''),
+    divisi_nama: divRow.nama || divRow.kode || it.divisi || ''
+  };
+});
+
+    render();
+  }catch(e){
+    root.innerHTML = `<div class="alert alert-danger">Gagal memuat: ${e.message||e}</div>`;
+  }finally{
+    U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350);
+  }
+}
+
 
   function getFiltered(){
     return items.filter(r=>{
@@ -288,17 +386,17 @@ Pages.ktu = function(){
           <td>${r.divisi_nama||r.divisi||'-'}</td>
           <td>${r.pekerjaan||''}</td>
           <td>${r.nama}</td>
-          <td class="text-end">${Number(r.jumlah||0)}</td>
+          <td class="text-end">${U.fmt.id0(r.jumlah)}</td>
           <td>${r.satuan||''}</td>
         </tr>`).join('');
     }
 
     const { perDivisi, estateTotal } = aggregate(data);
     U.qs('#ktu-sum-divisi').innerHTML = perDivisi.length
-      ? perDivisi.map(x=>`<tr><td>${x.divisi}</td><td>${x.nama}</td><td class="text-end">${x.total}</td><td>${x.satuan||''}</td></tr>`).join('')
+      ? perDivisi.map(x=>`<tr><td>${x.divisi}</td><td>${x.nama}</td><td class="text-end">${U.fmt.id0(x.total)}</td><td>${x.satuan||''}</td></tr>`).join('')
       : `<tr><td colspan="4" class="text-center text-muted">Tidak ada data.</td></tr>`;
     U.qs('#ktu-sum-estate').innerHTML = estateTotal.length
-      ? estateTotal.map(x=>`<tr><td>${x.nama}</td><td class="text-end">${x.total}</td><td>${x.satuan||''}</td></tr>`).join('')
+      ? estateTotal.map(x=>`<tr><td>${x.nama}</td><td class="text-end">${U.fmt.id0(x.total)}</td><td>${x.satuan||''}</td></tr>`).join('')
       : `<tr><td colspan="3" class="text-center text-muted">Tidak ada data.</td></tr>`;
   }
 
