@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RKB App - Karyamas Plantation</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" href="icons/icon-192x192.png" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"/>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="light">
+  <!-- Top Navbar -->
+  <nav id="navbar" class="navbar navbar-expand-lg fixed-top border-bottom bg-body-tertiary">
+    <div class="container-fluid">
+      <a class="navbar-brand fw-semibold" href="#/">RKB App</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="navContent">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0" id="main-menu">
+          <!-- Filled by app.js based on role -->
+        </ul>
+        <div class="d-flex align-items-center gap-3">
+          <span id="online-status" class="badge text-bg-secondary">offline</span>
+          <span id="active-user" class="text-muted small">-</span>
+          <button id="btn-logout" class="btn btn-sm btn-outline-danger d-none">Logout</button>
+          <button id="btn-theme" class="btn btn-sm btn-outline-secondary" title="Light/Dark">🌓</button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main container -->
+  <main class="container py-4" style="margin-top:72px;">
+    <!-- Loading -->
+    <div id="loading" class="d-none text-center my-5">
+      <div class="spinner-border" role="status"></div>
+      <p class="mt-2">Memuat...</p>
+    </div>
+
+    <!-- Root -->
+    <div id="app-root"></div>
+  </main>
+
+  <!-- Global progress modal -->
+  <div class="modal fade" id="progressModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Memproses...</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="progress mb-2" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="progressBar" class="progress-bar" style="width: 0%">0%</div>
+          </div>
+          <div id="progressText" class="small text-muted">Menyiapkan...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script>window.GAS_URL = "https://script.google.com/macros/s/AKfycbxLPqqds1uphvG8eIBgtgtHNZpcHU7swLiUIuXA6J1mhwBcAm4BQIL7KHH3uGv9IUgyNQ/exec"; /* TODO: paste your deployed GAS web app URL */</script>
+  <script src="js/utils.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/pages/dummies.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/storage.js"></script>
+
+  <!-- Pages -->
+   <script src="js/pages/inbox.js"></script>
+  <script src="js/pages/rkb_form.js"></script>
+  <script src="js/pages/rkb_list.js"></script>
+  <script src="js/pages/approvals_askep.js"></script>
+  <script src="js/pages/approvals_manager.js"></script>
+  <script src="js/pages/ktu.js"></script>
+  <script src="js/pages/settings.master.js"></script>
+  <script src="js/pages/settings.upload.js"></script>
+  <script src="js/pages/settings.reset.js"></script>
+  <script src="js/pages/settings.maintenance.js"></script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js');
+      });
+    }
+  </script>
+</body>
+</html>
