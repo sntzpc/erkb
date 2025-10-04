@@ -53,7 +53,6 @@ Pages.inbox = function(){
 
   async function load(preferLocal=true){
     try{
-      await STORE.ensureWarm();
       if(preferLocal){
         const cached = getActualInbox();
         if(Array.isArray(cached) && cached.length){

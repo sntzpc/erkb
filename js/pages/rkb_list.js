@@ -211,12 +211,62 @@ const DETAIL_HEADERS = [
     s.id='rkb-list-css'; s.textContent=css; document.head.appendChild(s);
   })();
 
-  // ===== Load data lokal =====
-  const draftKey  = 'rkb.drafts';
-  const outboxKey = 'rkb.outbox';
-  let data = which==='outbox'
-    ? (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error)   // hanya yang gagal
-    : (U.S.get(draftKey, [])||[]);
+// ===== Load data lokal (compat + fallback) =====
+const draftKey     = 'rkb.drafts';
+const draftKeyOld  = 'rkb.draft';       // kompatibel versi lama
+const outboxKey    = 'rkb.outbox';
+
+// Draft lokal (editable) + kompat versi lama
+function readDraftsCompat(){
+  // 1) kunci baru (utama)
+  let rows = U.S.get(draftKey, []);
+  if (Array.isArray(rows) && rows.length) return rows;
+
+  // 2) kunci lama (kompat)
+  const oldRows = U.S.get(draftKeyOld, []);
+  if (Array.isArray(oldRows) && oldRows.length){
+    U.S.set(draftKey, oldRows);
+    try{ localStorage.removeItem(draftKeyOld); }catch(_){}
+    return oldRows;
+  }
+
+  // 3) fallback: tidak ada draft lokal
+  return [];
+}
+
+// History dari server (read-only): ambil dari kpl.actual.rkb yang ditarik saat pullAll
+function readHistoryFromActuals(){
+  const all = (window.STORE && STORE.getActualsRkb) ? (STORE.getActualsRkb()||[]) : [];
+  const me  = (SESSION.profile()?.username || '').toLowerCase();
+
+  // tampilkan hanya RKB yang dibuat oleh user aktif
+  const mine = all.filter(x => String(x.username||'').toLowerCase() === me);
+
+  // map ke bentuk ringkasan untuk list; diberi bendera __history agar tombol edit/hapus/sync nonaktif
+  return mine.map(x => ({
+    nomor:        x.nomor,
+    periode:      x.periode,
+    divisi:       x.divisi,
+    estate_full:  x.estate_full,
+    status:       x.status || 'draft',
+    hk_total:     Number(x.hk_total||0),
+    created_at:   x.created_at || '',
+    updated_at:   x.updated_at || '',
+    items:        [],                // detail tidak ditarik di sini
+    __history:    true               // ← penanda item riwayat (read-only)
+  }));
+}
+
+// Gabungkan unik berdasar "nomor" — utamakan draft lokal (bila bentrok, history di-skip)
+function mergeUniqueByNomor(primaryArr, secondaryArr){
+  const used = new Set(primaryArr.map(r => String(r.nomor)));
+  const extra = (secondaryArr||[]).filter(r => !used.has(String(r.nomor)));
+  return primaryArr.concat(extra);
+}
+
+let data = (which==='outbox')
+  ? (U.S.get(outboxKey, [])||[]).filter(x=> !!x.last_error)   // hanya yg gagal
+  : mergeUniqueByNomor(readDraftsCompat(), readHistoryFromActuals());
 
   // ===== State UI =====
   let page=1, pageSize=20, q='', periodeFilter='';
@@ -573,49 +623,60 @@ ${sections}
       return;
     }
 
-    tb.innerHTML = slice.map((r,idx)=>{
-      let hk = Number(r.hk_total||0);
-      if(!hk && Array.isArray(r.items)) hk = r.items.reduce((a,it)=>a+computeHK(it).total,0);
-      const i = (page-1)*pageSize + idx;
-      const isDraft = String(r.status||'draft')==='draft';
-      const sBadge = String(r.status||'draft');
-      const badgeCls =
-        sBadge==='submitted' ? 'text-bg-warning' :
-        sBadge==='askep_approved' ? 'text-bg-info' :
-        sBadge==='full_approved' ? 'text-bg-success' :
-        'text-bg-secondary';
+tb.innerHTML = slice.map((r,idx)=>{
+  let hk = Number(r.hk_total||0);
+  if(!hk && Array.isArray(r.items)) hk = r.items.reduce((a,it)=>a+computeHK(it).total,0);
+  const i = (page-1)*pageSize + idx;
 
-      const btn = (name, title, action, enabled=true)=>{
-        const dis = enabled ? '' : 'disabled';
-        return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-i="${i}" ${dis}>
-                  <span class="i i-${name}">${ICON[name]}</span>
-                </button>`;
-      };
+  const isDraft   = String(r.status||'draft').toLowerCase()==='draft';
+  const isHistory = !!r.__history;           // ← dari server (read-only)
+  const canEdit   = which==='draft' && isDraft && !isHistory;
+  const canSync   = which==='draft' && isDraft && !isHistory && (r.items||[]).length>0;
+  const canDelete = which==='draft' && isDraft && !isHistory && !r.__serverLinked;
 
-      return `<tr>
-        <td>${i+1}</td>
-        <td>${r.nomor}</td>
-        <td>${r.periode||'-'}</td>
-        <td>${r.divisi||'-'}</td>
-        <td>${hk.toFixed(2)}</td>
-        <td><span class="badge ${badgeCls}">${sBadge}</span></td>
-        ${which==='outbox' ? `<td class="hide-sm">${r.last_error||''}</td>` : ''}
-        <td>
-          <div class="btn-group btn-group-sm">
-            ${btn('view','Lihat (detail)','view',true)}
-            ${btn('edit','Edit','edit', isDraft && which==='draft')}
-            ${btn('del','Hapus','del',  isDraft && which==='draft')}
-            ${which==='draft'
-              ? btn('sync','Kirim/Sync ke server','sync', isDraft && (r.items||[]).length>0)
-              : `<button class="btn btn-outline-success icon-btn" title="Kirim Ulang" data-a="resend" data-i="${i}">
-                   <span class="i">⟳</span>
-                 </button>`
-            }
-            ${btn('refresh','Perbarui Status','refresh',true)}
-          </div>
-        </td>
-      </tr>`;
-    }).join('');
+  const sBadge = String(r.status||'draft');
+  const badgeCls =
+    sBadge==='submitted' ? 'text-bg-warning' :
+    sBadge==='askep_approved' ? 'text-bg-info' :
+    sBadge==='full_approved' ? 'text-bg-success' :
+    'text-bg-secondary';
+
+    // badge kecil penanda riwayat (read-only)
+  const histBadge = r.__history
+  ? '<span class="badge bg-light text-dark border ms-1" title="Rewayat dari server (read-only)">Server</span>'
+  : '';
+
+  const btn = (name, title, action, enabled=true)=>{
+    const dis = enabled ? '' : 'disabled';
+    return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-i="${i}" ${dis}>
+              <span class="i i-${name}">${ICON[name]}</span>
+            </button>`;
+  };
+
+  return `<tr>
+    <td>${i+1}</td>
+    <td>${r.nomor}</td>
+    <td>${r.periode||'-'}</td>
+    <td>${r.divisi||'-'}</td>
+    <td>${hk.toFixed(2)}</td>
+    <td><span class="badge ${badgeCls}">${sBadge}</span>${histBadge}</td>
+    ${which==='outbox' ? `<td class="hide-sm">${r.last_error||''}</td>` : ''}
+    <td>
+      <div class="btn-group btn-group-sm">
+        ${btn('view','Lihat (detail)','view', true)}
+        ${btn('edit','Edit','edit',  canEdit)}
+        ${btn('del','Hapus','del',   canDelete)}
+        ${which==='draft'
+          ? btn('sync','Kirim/Sync ke server','sync', canSync)
+          : `<button class="btn btn-outline-success icon-btn" title="Kirim Ulang" data-a="resend" data-i="${i}">
+               <span class="i">⟳</span>
+             </button>`
+        }
+        ${btn('refresh','Perbarui Status','refresh', true)}
+      </div>
+    </td>
+  </tr>`;
+}).join('');
 
     // Bind actions
     tb.querySelectorAll('button').forEach(btn=>{
@@ -670,15 +731,23 @@ ${sections}
     const row = (which==='outbox') ? data[idx] : arr[idx];
 
     if(a==='del'){
-      if(!confirm('Hapus RKB ini dari daftar?')) return;
-      arr.splice(idx,1);
-      U.S.set(listKey, arr);
-      data = (which==='outbox') ? arr.filter(x=>!!x.last_error) : arr;
-      sortData(data); renderRows(); renderPager();
-      return;
-    }
+  if (row && row.__history){
+    U.toast('Ini riwayat dari server dan tidak bisa dihapus.', 'warning');
+    return;
+  }
+  if (row && row.__serverLinked){
+    U.toast('RKB revisi dari server tidak bisa dihapus. Silakan edit lalu Sync.', 'warning');
+    return;
+  }
+  if(!confirm('Hapus RKB ini dari daftar?')) return;
+  arr.splice(idx,1);
+  U.S.set(listKey, arr);
+  data = (which==='outbox') ? arr.filter(x=>!!x.last_error) : arr;
+  sortData(data); renderRows(); renderPager();
+  return;
+}
 
-    if(a==='edit'){
+if(a==='edit'){
       U.S.set('rkb.form.buffer', row);
       location.hash = '#/rkb/form';
       return;

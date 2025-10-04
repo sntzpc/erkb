@@ -28,7 +28,6 @@ Pages.approvalsAskep = function () {
 
   async function load(preferLocal = true) {
     try {
-      await STORE.ensureWarm(); // pastikan cache masters/actuals sudah ada
       let rows = [];
       if (preferLocal) {
         const cached = getActualRkb();

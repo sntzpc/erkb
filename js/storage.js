@@ -14,10 +14,67 @@ window.STORE = {
   setActualsRkb(rows){ this.setActual('rkb', rows); },
   getActualsRkb(){ return this.getActual('rkb'); },
 
+  // ---------- DRAFTS (lokal) ----------
+  getDrafts(){ return U.S.get('rkb.drafts', []) || []; },
+  setDrafts(rows){ U.S.set('rkb.drafts', rows || []); },
+
+  /**
+   * Serap RKB berstatus 'draft' dari server → masuk ke draft lokal.
+   * - Menandai item sebagai __serverLinked agar tidak bisa dihapus.
+   * - Jika sudah ada di lokal, hanya update ringkasan bila server lebih baru.
+   */
+  absorbServerDrafts(serverRkbs = []){
+    const incoming = (serverRkbs || []).filter(x => String(x.status||'').toLowerCase() === 'draft');
+    if (!incoming.length) return {added:0, updated:0};
+
+    const drafts = this.getDrafts();
+    const idxMap = new Map(drafts.map(r => [String(r.nomor), r]));
+
+    let added = 0, updated = 0;
+    const nowIso = new Date().toISOString();
+
+    incoming.forEach(srv => {
+      const key = String(srv.nomor);
+      const payload = {
+        nomor: srv.nomor,
+        periode: srv.periode,
+        divisi: srv.divisi,
+        estate_full: srv.estate_full,
+        status: 'draft',
+        hk_total: Number(srv.hk_total || 0),
+        __serverLinked: true,
+        __serverUpdatedAt: srv.updated_at || srv.created_at || nowIso,
+        created_at: srv.created_at || nowIso,
+        updated_at: nowIso,
+        // catatan: items tidak ikut ditarik di sini (hemat), akan diambil saat edit via getRkbDetail jika diperlukan
+        items: Array.isArray(srv.items) ? srv.items : []
+      };
+
+      if (!idxMap.has(key)){
+        drafts.unshift(payload);
+        added++;
+      } else {
+        const cur = idxMap.get(key);
+        const tSrv = new Date(payload.__serverUpdatedAt||0).getTime();
+        const tLoc = new Date(cur.updated_at||0).getTime();
+        if (tSrv > tLoc){
+          const keepItems = Array.isArray(cur.items) ? cur.items : [];
+          Object.assign(cur, payload, { items: keepItems.length ? keepItems : payload.items });
+          updated++;
+        } else {
+          cur.__serverLinked = true; // tetap tandai agar tidak bisa dihapus
+        }
+      }
+    });
+
+    this.setDrafts(drafts);
+    return {added, updated};
+  },
+
   // ---------- COUNTERS (opsional: unread inbox, dll) ----------
   counterKey(name){ return `kpl.counter.${name}`; },
   setCounter(name, value){ localStorage.setItem(this.counterKey(name), String(value)); },
-  getCounter(name){ 
+  getCounter(name){
     const v = localStorage.getItem(this.counterKey(name));
     return v==null ? null : (isNaN(+v) ? v : +v);
   },
@@ -31,6 +88,7 @@ window.STORE = {
     try{
       U.progressOpen('Menarik master & data aktual...');
       U.progress(20,'Minta server');
+
       const r = await API.call('pullMaster', {});
       if(!r.ok) throw new Error(r.error||'Gagal tarik');
 
@@ -41,6 +99,11 @@ window.STORE = {
 
       // simpan SEMUA actuals yang diberikan backend (generic)
       Object.entries(actuals||{}).forEach(([k,v])=> this.setActual(k, v||[]));
+
+      // >>> Serap RKB draft dari server ke draft lokal (agar bisa diedit, tapi tidak bisa dihapus)
+      if (actuals && Array.isArray(actuals.rkb)){
+        this.absorbServerDrafts(actuals.rkb);
+      }
 
       // simpan counters (opsional)
       if (counters && typeof counters.inboxUnread !== 'undefined'){

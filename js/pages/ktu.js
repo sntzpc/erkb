@@ -23,9 +23,7 @@ Pages.ktu = function(){
 
   async function load(preferLocal=true){
     try{
-      await STORE.ensureWarm();
-
-      // masters
+       // masters
       masters.ydivisi = STORE.getMaster('ydivisi')||[];
       masters.yrayon  = STORE.getMaster('yrayon')||[];
       masters.yestate = STORE.getMaster('yestate')||[];

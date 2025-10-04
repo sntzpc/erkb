@@ -21,7 +21,6 @@ Pages.approvalsManager = function () {
 
   async function load(preferLocal=true) {
     try {
-      await STORE.ensureWarm();
       let rows = [];
       if(preferLocal){
         const cached = getActualRkb();

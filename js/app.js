@@ -97,28 +97,38 @@ function buildMenu(){
     addItem('#/','Beranda');
 
     // 2) RKB: Form, Draft
+    if(role==='Asisten' || role==='Admin'){
     addDropdown('RKB', `
       <li><a class="dropdown-item" href="#/rkb/form">Form</a></li>
       <li><a class="dropdown-item" href="#/rkb/draft">Draft</a></li>
     `);
+    }
 
     // 3) PDO: Form, Draft (DUMMY)
+    if(role==='Asisten' || role==='Admin'){
     addDropdown('PDO', `
       <li><a class="dropdown-item" href="#/pdo/form">Form</a></li>
       <li><a class="dropdown-item" href="#/pdo/draft">Draft</a></li>
     `);
+    }
 
     // 4) RKH: Form, Draft (DUMMY)
+    if(role==='Asisten' || role==='Admin'){
     addDropdown('RKH', `
       <li><a class="dropdown-item" href="#/rkh/form">Form</a></li>
       <li><a class="dropdown-item" href="#/rkh/draft">Draft</a></li>
     `);
+    }
 
     // 5) Outbox (tetap top-level)
+    if(role==='Asisten' || role==='Admin'){
     addItem('#/outbox','Outbox');
+    }
 
     // 6) Pesan (badge lama dipertahankan)
+    if(role==='Asisten' || role==='Admin'){
     addItem('#/inbox', `Pesan <span id="badge-inbox" class="badge rounded-pill text-bg-danger ms-1 d-none">0</span>`);
+    }
 
     // 7) Approval: Askep, Manager (tampilkan sesuai role)
     if(role==='Askep' || role==='Admin' || role==='Manager'){
