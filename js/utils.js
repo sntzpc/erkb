@@ -105,6 +105,119 @@ window.U = (function(){
     }
   };
 
+  // ====== [GLOBAL GUARD] Pastikan master/actuals sudah tersedia ======
+function _lsHasPrefix(prefix){
+  return Object.keys(localStorage).some(k => k.startsWith(prefix));
+}
+function _hasAnyMaster(){ return _lsHasPrefix('kpl.master.'); }
+function _hasAnyActual(){ return _lsHasPrefix('kpl.actual.'); }
+
+function _hasMaster(name){ return !!localStorage.getItem(`kpl.master.${name}`); }
+function _hasActual(name){ return !!localStorage.getItem(`kpl.actual.${name}`); }
+
+/**
+ * Cek apakah data lokal 'hangat' (tersedia).
+ * - mastersNeeded: string[] nama master yg wajib (opsional)
+ * - actualsNeeded: string[] nama actuals yg wajib (opsional)
+ * return: { ok:boolean, missing:{masters:string[], actuals:string[]} }
+ */
+function _isWarm({ mastersNeeded=[], actualsNeeded=[] } = {}){
+  const missM = [];
+  const missA = [];
+
+  // minimal ada salah satu master/actuals di lokal
+  if(!_hasAnyMaster()) missM.push('(semua)');
+  if(!_hasAnyActual()) missA.push('(semua)');
+
+  // jika spesifik diminta
+  mastersNeeded.forEach(n => { if(!_hasMaster(n)) missM.push(n); });
+  actualsNeeded.forEach(n => { if(!_hasActual(n)) missA.push(n); });
+
+  const ok = (missM.length===0 && missA.length===0);
+  return { ok, missing:{masters:missM, actuals:missA} };
+}
+
+/** Modal simple (Bootstrap) untuk info + tombol arahkan ke Beranda */
+function _ensureInfoModal(){
+  let el = document.getElementById('pull-required-modal');
+  if(el) return el;
+  el = document.createElement('div');
+  el.id = 'pull-required-modal';
+  el.className = 'modal fade';
+  el.innerHTML = `
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title">Data Belum Tersedia</h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+      <div id="pull-required-body" class="small"></div>
+      <div class="alert alert-warning mt-2">
+        Silakan lakukan <b>Tarik Master & Data Aktual</b> di halaman <b>Beranda</b> terlebih dahulu.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="pull-required-go" class="btn btn-primary">Ke Beranda</button>
+    </div>
+  </div></div>`;
+  document.body.appendChild(el);
+  return el;
+}
+
+/**
+ * Tampilkan modal “Tarik Master & Data Aktual dulu”
+ * - message: string (opsional)
+ * - onGo: callback ketika user klik "Ke Beranda"
+ */
+function showPullRequiredModal(message='', onGo=()=>{}){
+  const el = _ensureInfoModal();
+  const body = el.querySelector('#pull-required-body');
+  body.innerHTML = message || 'Beberapa data yang diperlukan belum tersedia di perangkat ini.';
+  const modal = new bootstrap.Modal(el, { backdrop:'static', keyboard:false });
+  el.querySelector('#pull-required-go').onclick = ()=>{
+    modal.hide();
+    onGo();
+  };
+  modal.show();
+}
+
+/**
+ * Guard siap pakai:
+ * Jika data belum hangat → munculkan modal & arahkan ke Beranda.
+ * return Promise<boolean> → true jika OK untuk lanjut, false jika dialihkan.
+ */
+async function requireWarmOrRedirect(opts = {}){
+  // opsional: jika halaman lain sudah membuka progress, jangan dobel.
+  try{
+    await STORE?.ensureWarm?.(); // kalau sudah hangat, ini cepat
+  }catch(_){/* abaikan */}
+
+  const { ok, missing } = _isWarm(opts);
+  if(ok) return true;
+
+  const msg = `
+    <div>Data yang belum tersedia:</div>
+    ${missing.masters.length ? `<div class="mt-1">Master: <code>${missing.masters.join(', ')}</code></div>` : ''}
+    ${missing.actuals.length ? `<div class="mt-1">Actuals: <code>${missing.actuals.join(', ')}</code></div>` : ''}
+  `;
+  showPullRequiredModal(msg, ()=>{
+    // arahkan ke beranda
+    location.hash = '#/home';
+  });
+  return false;
+}
+
+// ====== [GLOBAL PROGRESS HELPERS] cegah double progress ======
+function progressIsOpen(){
+  const el = document.getElementById('progressModal');
+  return !!(el && el.classList.contains('show'));
+}
+function safeProgressOpen(title='Memproses...'){
+  if (progressIsOpen()) return false; // ada yg sudah buka
+  U.progressOpen(title);
+  return true;
+}
+
   // Debounce
   function debounce(fn, delay=500){
     let t=null; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), delay); };
@@ -149,5 +262,5 @@ window.U = (function(){
   window.addEventListener('offline', updateOnlineBadge);
 
   // expose
-  return { S, qs, qsa, fmt, htmlBR, debounce, toast, progressOpen, progressClose, progress, updateOnlineBadge };
+  return { S, qs, qsa, fmt, htmlBR, debounce, toast, progressOpen, progressClose, progress, updateOnlineBadge, requireWarmOrRedirect, progressIsOpen, safeProgressOpen };
 })();

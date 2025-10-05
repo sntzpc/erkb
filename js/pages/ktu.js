@@ -1,7 +1,19 @@
 // js/pages/ktu.js
 window.Pages = window.Pages || {};
-Pages.ktu = function(){
+Pages.ktu = async function(){
   const root = U.qs('#app-root');
+
+  // ===== [GUARD: WAJIB DATA HANGAT] =====
+  // contoh minimal: butuh master ydivisi, yrayon, yestate dan actuals rkb
+  const ok = await U.requireWarmOrRedirect({
+    mastersNeeded: ['ydivisi','yrayon','yestate'],
+    actualsNeeded: ['rkb']   // kalau perlu yang lain, tambahkan di sini
+  });
+  if(!ok){
+    // tampilkan placeholder tipis; return supaya halaman ini tidak lanjut render
+    root.innerHTML = `<div class="alert alert-warning">Menunggu Tarik Master & Data Aktual...</div>`;
+    return;
+  }
 
   const ACT_KEY_KTU = 'kpl.actual.ktu_rekap';
   function getKtuCache(){ return U.S.get(ACT_KEY_KTU, []) || []; }
@@ -21,101 +33,106 @@ Pages.ktu = function(){
   let masters = { ydivisi:[], yrayon:[], yestate:[] };
   let filters = { periode:'', divisi_id:'', rayon_id:'', estate_id:'' };
 
-  // ---- Helper cari rayon dari berbagai jalur (id/kode/nama) ----
+// ---- Index helper (cepat & tegas) ----
 function _lc(v){ return v==null ? '' : String(v).trim().toLowerCase(); }
-function _eq(a,b){ return _lc(a) === _lc(b); }
 
-function _findRayonByAny(val, rayons){
-  if(!val) return null;
-  return (rayons||[]).find(r =>
-    _eq(r.id, val) || _eq(r.rayon_id, val) ||
-    _eq(r.kode, val) || _eq(r.kd_rayon, val) || _eq(r.kode_rayon, val) ||
-    _lc(r.nama||r.nama_rayon) === _lc(val)
-  ) || null;
+function buildDivisiIndex(list){
+  const byId=new Map(), byKode=new Map(), byNama=new Map();
+  (list||[]).forEach(d=>{
+    const id   = d.id ?? d.divisi_id;
+    const kode = d.kode ?? d.kd_divisi;
+    const nama = d.nama ?? d.nama_divisi;
+    if(id!=null)   byId.set(_lc(id), d);
+    if(kode!=null) byKode.set(_lc(kode), d);
+    if(nama!=null) byNama.set(_lc(nama), d);
+  });
+  return { byId, byKode, byNama };
 }
 
-function _findDivisiByAny(val, divisis){
-  if(!val) return null;
-  const v = _lc(val);
-  return (divisis||[]).find(d =>
-    _eq(d.id, val) || _eq(d.divisi_id, val) ||
-    _eq(d.kode, val) || _eq(d.kd_divisi, val) ||
-    _lc(d.nama||d.nama_divisi) === v
-  ) || null;
+function buildRayonIndex(list){
+  const byId=new Map(), byKode=new Map(), byNama=new Map();
+  (list||[]).forEach(r=>{
+    const id   = r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? r.kode_rayon;
+    const kode = r.kode ?? r.kd_rayon ?? r.kode_rayon ?? r.rayon_id;
+    const nama = r.nama ?? r.nama_rayon ?? r.rayon_nama;
+    if(id!=null)   byId.set(_lc(id), r);
+    if(kode!=null) byKode.set(_lc(kode), r);
+    if(nama!=null) byNama.set(_lc(nama), r);
+  });
+  return { byId, byKode, byNama };
 }
 
-function _findEstateByAny(val, estates){
-  if(!val) return null;
-  const v = _lc(val);
-  return (estates||[]).find(e =>
-    _eq(e.id, val) || _eq(e.kode, val) || _eq(e.kd_estate, val) ||
-    _lc(e.nama_panjang||e.nama) === v
-  ) || null;
+function findDivRow(divisiId, divisiLabel, DX){
+  if(divisiId){
+    const hit = DX.byId.get(_lc(divisiId));
+    if(hit) return hit;
+  }
+  if(divisiLabel){
+    const k = _lc(divisiLabel);
+    return DX.byKode.get(k) || DX.byNama.get(k) || null;
+  }
+  return null;
+}
+
+function findRayonRowByAny(rayonIdOrKode, RX){
+  if(!rayonIdOrKode) return null;
+  const k=_lc(rayonIdOrKode);
+  return RX.byId.get(k) || RX.byKode.get(k) || RX.byNama.get(k) || null;
 }
 
 /**
- * Menentukan rayon dari konteks RKB + master.
- * Urutan:
- * 1) ctx.rayon_id langsung
- * 2) ydivisi (via ctx.divisi_id ATAU ctx.divisi_label)
- * 3) yestate (via ctx.estate_id ATAU ctx.estate_label)
- * 4) (opsional) jika divisi punya kolom nama rayon
+ * Ambil rayon_id prioritas:
+ * 1) dari actuals RKB (by nomor)
+ * 2) fallback dari ydivisi (kolom: rayon_id | kd_rayon | kode_rayon | rayon)
  */
-function resolveRayonForContext(ctx, masters){
-  const { rayon_id, divisi_id, divisi_label, estate_id, estate_label } = ctx || {};
-  const rayons  = masters?.yrayon  || [];
-  const divisis = masters?.ydivisi || [];
-  const estates = masters?.yestate || [];
+function resolveRayonId({ nomor, divisi_id, divisi_label }, { rkbByNomor, DX }){
+  // 1) dari RKB actuals
+  const ridFromRkb = rkbByNomor[String(nomor)]?.rayon_id;
+  if(ridFromRkb) return String(ridFromRkb);
 
-  // 1) dari ctx.rayon_id
-  if(rayon_id){
-    const r = _findRayonByAny(rayon_id, rayons);
-    if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
-  }
-
-  // 2) dari ydivisi (id ataupun label/nama)
-  let drow = _findDivisiByAny(divisi_id, divisis);
-  if(!drow && divisi_label){ drow = _findDivisiByAny(divisi_label, divisis); }
+  // 2) dari ydivisi
+  const drow = findDivRow(divisi_id, divisi_label, DX);
   if(drow){
-    // coba banyak kemungkinan kolom rayon di ydivisi
-    const cand = [drow.rayon_id, drow.kd_rayon, drow.kode_rayon, drow.rayon].filter(Boolean);
-    for(const c of cand){
-      const r = _findRayonByAny(c, rayons);
-      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
-    }
-    // kadang ada nama rayon di ydivisi
-    if(drow.nama_rayon || drow.rayon_nama){
-      const r = _findRayonByAny(drow.nama_rayon || drow.rayon_nama, rayons);
-      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
-    }
+    return String(
+      drow.rayon_id ?? drow.kd_rayon ?? drow.kode_rayon ?? drow.rayon ?? ''
+    );
   }
-
-  // 3) dari yestate (id ataupun label/nama)
-  let erow = _findEstateByAny(estate_id, estates);
-  if(!erow && estate_label){ erow = _findEstateByAny(estate_label, estates); }
-  if(erow){
-    const candE = [erow.rayon_id, erow.kd_rayon, erow.kode_rayon, erow.rayon].filter(Boolean);
-    for(const c of candE){
-      const r = _findRayonByAny(c, rayons);
-      if(r) return { rayon_id: r.id ?? r.rayon_id ?? r.kode ?? r.kd_rayon ?? '', rayon_nama: r.nama ?? r.nama_rayon ?? '' };
-    }
-  }
-
-  // 4) gagal → kosong
-  return { rayon_id: '', rayon_nama: '' };
+  return '';
 }
 
+/**
+ * Resolve final rayon (id + nama). Jika nama tidak ditemukan di master,
+ * kembalikan nama = rayon_id (agar kolom Rayon tidak kosong).
+ */
+function resolveRayon({ nomor, divisi_id, divisi_label }, ctx){
+  const { rkbByNomor, RX } = ctx;
+  const rayon_id = resolveRayonId({ nomor, divisi_id, divisi_label }, ctx);
+  if(!rayon_id) return { rayon_id: '', rayon_nama: '' };
 
+  const rrow = findRayonRowByAny(rayon_id, RX);
+  const rayon_nama = rrow
+    ? (rrow.nama ?? rrow.nama_rayon ?? rrow.rayon_nama ?? String(rayon_id))
+    : String(rayon_id); // fallback tampilkan id-nya
 
-  async function load(preferLocal=true){
+  return { rayon_id: String(rayon_id), rayon_nama: String(rayon_nama) };
+}
+
+async function load(preferLocal=true){
+  let openedHere = false;
   try{
     // masters
     masters.ydivisi = STORE.getMaster('ydivisi')||[];
     masters.yrayon  = STORE.getMaster('yrayon')||[];
     masters.yestate = STORE.getMaster('yestate')||[];
 
+    // build index
+    const DX = buildDivisiIndex(masters.ydivisi);
+    const RX = buildRayonIndex(masters.yrayon);
+
+    // actuals rkb
     const actuals = STORE.getActualsRkb();
     const rkbByNomor = Object.fromEntries((actuals||[]).map(r=>[String(r.nomor), r]));
+
     const estateById = Object.fromEntries((masters.yestate||[]).map(x=>[String(x.id), x]));
     const divById    = Object.fromEntries((masters.ydivisi||[]).map(x=>[String(x.id), x]));
 
@@ -127,7 +144,11 @@ function resolveRayonForContext(ctx, masters){
       }
     }
     if(!raw.length){
-      U.progressOpen('Tarik rekap bahan...'); U.progress(30,'Ambil data (server)');
+      // --- cegah double progress: hanya buka jika belum ada modal "show"
+      const pm = document.getElementById('progressModal');
+      const pmShown = pm && pm.classList.contains('show');
+      if(!pmShown){ U.progressOpen('Tarik rekap bahan...'); U.progress(30,'Ambil data (server)'); openedHere = true; }
+
       const r = await API.call('ktuRekap', {});
       if(!r.ok) throw new Error(r.error||'Gagal tarik');
       raw = Array.isArray(r.items) ? r.items : [];
@@ -135,44 +156,43 @@ function resolveRayonForContext(ctx, masters){
     }
 
     items = raw.map(it=>{
-  const rkb = rkbByNomor[String(it.nomor)] || {};
-  const estateRow = estateById[String(rkb.estate_id||'')] || {};
-  const divRow    = divById[String(rkb.divisi_id||'')]    || {};
+      const rkb       = rkbByNomor[String(it.nomor)] || {};
+      const estateRow = estateById[String(rkb.estate_id||'')] || {};
+      const divRow    = divById[String(rkb.divisi_id||'')]    || {};
 
-  // >>> Cari rayon secara robust (pakai id & label sebagai fallback)
-  const ray = resolveRayonForContext(
-    {
-      rayon_id:      rkb.rayon_id,
-      divisi_id:     rkb.divisi_id,
-      divisi_label:  it.divisi || rkb.divisi || divRow?.nama || divRow?.kode,
-      estate_id:     rkb.estate_id,
-      estate_label:  rkb.estate_full || estateRow?.nama_panjang || estateRow?.nama
-    },
-    masters
-  );
+      // >>> Rayon: ambil dari RKB (jika ada), fallback ydivisi
+      const ray = resolveRayon(
+        {
+          nomor:        it.nomor,
+          divisi_id:    rkb.divisi_id,
+          divisi_label: it.divisi || rkb.divisi || divRow?.nama || divRow?.kode
+        },
+        { rkbByNomor, DX, RX }
+      );
 
-  return {
-    nomor: it.nomor,
-    periode: fPeriode(it.periode),
-    divisi: it.divisi||'',
-    pekerjaan: it.pekerjaan||'',
-    nama: it.nama,
-    jumlah: Number(it.jumlah||0),
-    satuan: it.satuan||'',
-    estate_id: String(rkb.estate_id||''),
-    estate_full: rkb.estate_full || estateRow.nama_panjang || estateRow.nama || '',
-    rayon_id: String(ray.rayon_id||''),
-    rayon_nama: ray.rayon_nama || '',
-    divisi_id: String(rkb.divisi_id||''),
-    divisi_nama: divRow.nama || divRow.kode || it.divisi || ''
-  };
-});
+      return {
+        nomor: it.nomor,
+        periode: fPeriode(it.periode),
+        divisi: it.divisi||'',
+        pekerjaan: it.pekerjaan||'',
+        nama: it.nama,
+        jumlah: Number(it.jumlah||0),
+        satuan: it.satuan||'',
+        estate_id: String(rkb.estate_id||''),
+        estate_full: rkb.estate_full || estateRow.nama_panjang || estateRow.nama || '',
+        rayon_id: String(ray.rayon_id||''),
+        rayon_nama: ray.rayon_nama || '',
+        divisi_id: String(rkb.divisi_id||''),
+        divisi_nama: divRow.nama || divRow.kode || it.divisi || ''
+      };
+    });
 
     render();
   }catch(e){
     root.innerHTML = `<div class="alert alert-danger">Gagal memuat: ${e.message||e}</div>`;
   }finally{
-    U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350);
+    // tutup progress hanya jika halaman ini yang membuka
+    if(openedHere){ U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350); }
   }
 }
 
