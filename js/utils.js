@@ -1,5 +1,8 @@
+// js/utils.js
 window.U = (function(){
   const ls = window.localStorage;
+
+  // === LocalStorage mini wrapper ===
   const S = {
     get: (k, def=null) => { try { const v = ls.getItem(k); return v ? JSON.parse(v) : def; } catch(e){ return def; } },
     set: (k, v) => ls.setItem(k, JSON.stringify(v)),
@@ -8,11 +11,11 @@ window.U = (function(){
     clearAll: () => ls.clear(),
   };
 
+  // === DOM helpers ===
   const qs   = (sel, el=document)=>el.querySelector(sel);
   const qsa  = (sel, el=document)=>Array.from(el.querySelectorAll(sel));
 
   // === Formatters (angka & tanggal, ID) ===
-  // NOTE: menambah formatter global tanpa mengganggu util lama.
   const nf0 = new Intl.NumberFormat('id-ID'); // ribuan, tanpa desimal
   const nf2 = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -40,37 +43,18 @@ window.U = (function(){
     },
 
     // --- NEW: angka Indonesia ---
-    /**
-     * Format angka Indonesia tanpa desimal (pemisah ribuan).
-     * Contoh: U.fmt.id0(12345) -> "12.345"
-     */
+    /** "12.345" */
     id0(v, fallback='0'){
       const n = toNum(v);
       return n === null ? fallback : nf0.format(n);
     },
-
-    /**
-     * Format angka Indonesia dengan 2 desimal (ribuan + 2 desimal).
-     * Cocok untuk HK, volume, dll.
-     * Contoh: U.fmt.id2(12345.6) -> "12.345,60"
-     */
+    /** "12.345,60" */
     id2(v, fallback='0,00'){
       const n = toNum(v);
       return n === null ? fallback : nf2.format(n);
     },
-
-    /**
-     * Alias semantik untuk HK.
-     */
-    hk(v, fallback='0,00'){
-      return this.id2(v, fallback);
-    },
-
-    /**
-     * Format IDR (default tanpa desimal).
-     * Contoh: U.fmt.idr(1500000) -> "Rp1.500.000"
-     *        U.fmt.idr(1500000, 2) -> "Rp1.500.000,00"
-     */
+    hk(v, fallback='0,00'){ return this.id2(v, fallback); },
+    /** "Rp1.500.000,00" (jika fractionDigits=2) */
     idr(v, fractionDigits=0){
       const n = toNum(v) ?? 0;
       return new Intl.NumberFormat('id-ID', {
@@ -80,12 +64,7 @@ window.U = (function(){
         maximumFractionDigits: fractionDigits,
       }).format(n);
     },
-
-    /**
-     * Format periode apa pun ke "YYYY-MM" zona Asia/Jakarta.
-     * Terima "YYYY-MM", ISO date, atau Date object.
-     * Contoh: U.fmt.periodeYM("2025-11-30T17:00:00.000Z") -> "2025-11"
-     */
+    /** "YYYY-MM" (zona Asia/Jakarta) */
     periodeYM(p){
       if(!p) return '';
       if (p instanceof Date) {
@@ -95,9 +74,9 @@ window.U = (function(){
         return `${y}-${m}`;
       }
       const s = String(p).trim();
-      if (/^\d{4}-\d{2}$/.test(s)) return s; // sudah "YYYY-MM"
+      if (/^\d{4}-\d{2}$/.test(s)) return s;
       const d = new Date(s);
-      if (isNaN(d)) return s; // bukan tanggal valid -> tampilkan apa adanya
+      if (isNaN(d)) return s;
       const tz = 'Asia/Jakarta';
       const y = new Intl.DateTimeFormat('id-ID', { timeZone: tz, year: 'numeric' }).format(d);
       const m = new Intl.DateTimeFormat('id-ID', { timeZone: tz, month: '2-digit' }).format(d);
@@ -106,117 +85,190 @@ window.U = (function(){
   };
 
   // ====== [GLOBAL GUARD] Pastikan master/actuals sudah tersedia ======
-function _lsHasPrefix(prefix){
-  return Object.keys(localStorage).some(k => k.startsWith(prefix));
-}
-function _hasAnyMaster(){ return _lsHasPrefix('kpl.master.'); }
-function _hasAnyActual(){ return _lsHasPrefix('kpl.actual.'); }
+  function _lsHasPrefix(prefix){
+    return Object.keys(localStorage).some(k => k.startsWith(prefix));
+  }
+  function _hasAnyMaster(){ return _lsHasPrefix('kpl.master.'); }
+  function _hasAnyActual(){ return _lsHasPrefix('kpl.actual.'); }
 
-function _hasMaster(name){ return !!localStorage.getItem(`kpl.master.${name}`); }
-function _hasActual(name){ return !!localStorage.getItem(`kpl.actual.${name}`); }
+  function _hasMaster(name){ return !!localStorage.getItem(`kpl.master.${name}`); }
+  function _hasActual(name){ return !!localStorage.getItem(`kpl.actual.${name}`); }
 
-/**
- * Cek apakah data lokal 'hangat' (tersedia).
- * - mastersNeeded: string[] nama master yg wajib (opsional)
- * - actualsNeeded: string[] nama actuals yg wajib (opsional)
- * return: { ok:boolean, missing:{masters:string[], actuals:string[]} }
- */
-function _isWarm({ mastersNeeded=[], actualsNeeded=[] } = {}){
-  const missM = [];
-  const missA = [];
+  /**
+   * Cek apakah data lokal 'hangat' (tersedia).
+   * - mastersNeeded: string[] nama master yg wajib (opsional)
+   * - actualsNeeded: string[] nama actuals yg wajib (opsional)
+   * return: { ok:boolean, missing:{masters:string[], actuals:string[]} }
+   */
+  function _isWarm({ mastersNeeded=[], actualsNeeded=[] } = {}){
+    const missM = [];
+    const missA = [];
 
-  // minimal ada salah satu master/actuals di lokal
-  if(!_hasAnyMaster()) missM.push('(semua)');
-  if(!_hasAnyActual()) missA.push('(semua)');
+    if(!_hasAnyMaster()) missM.push('(semua)');
+    if(!_hasAnyActual()) missA.push('(semua)');
 
-  // jika spesifik diminta
-  mastersNeeded.forEach(n => { if(!_hasMaster(n)) missM.push(n); });
-  actualsNeeded.forEach(n => { if(!_hasActual(n)) missA.push(n); });
+    mastersNeeded.forEach(n => { if(!_hasMaster(n)) missM.push(n); });
+    actualsNeeded.forEach(n => { if(!_hasActual(n)) missA.push(n); });
 
-  const ok = (missM.length===0 && missA.length===0);
-  return { ok, missing:{masters:missM, actuals:missA} };
-}
+    const ok = (missM.length===0 && missA.length===0);
+    return { ok, missing:{masters:missM, actuals:missA} };
+  }
 
-/** Modal simple (Bootstrap) untuk info + tombol arahkan ke Beranda */
-function _ensureInfoModal(){
-  let el = document.getElementById('pull-required-modal');
-  if(el) return el;
-  el = document.createElement('div');
-  el.id = 'pull-required-modal';
-  el.className = 'modal fade';
-  el.innerHTML = `
-  <div class="modal-dialog"><div class="modal-content">
-    <div class="modal-header">
-      <h5 class="modal-title">Data Belum Tersedia</h5>
-      <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-    </div>
-    <div class="modal-body">
-      <div id="pull-required-body" class="small"></div>
-      <div class="alert alert-warning mt-2">
-        Silakan lakukan <b>Tarik Master & Data Aktual</b> di halaman <b>Beranda</b> terlebih dahulu.
+  /** Modal simple (Bootstrap) untuk info + tombol arahkan ke Beranda */
+  function _ensureInfoModal(){
+    let el = document.getElementById('pull-required-modal');
+    if(el) return el;
+    el = document.createElement('div');
+    el.id = 'pull-required-modal';
+    el.className = 'modal fade';
+    el.innerHTML = `
+    <div class="modal-dialog"><div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Data Belum Tersedia</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-    </div>
-    <div class="modal-footer">
-      <button id="pull-required-go" class="btn btn-primary">Ke Beranda</button>
-    </div>
-  </div></div>`;
-  document.body.appendChild(el);
-  return el;
-}
+      <div class="modal-body">
+        <div id="pull-required-body" class="small"></div>
+        <div class="alert alert-warning mt-2">
+          Silakan lakukan <b>Tarik Master & Data Aktual</b> di halaman <b>Beranda</b> terlebih dahulu.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="pull-required-go" class="btn btn-primary">Ke Beranda</button>
+      </div>
+    </div></div>`;
+    document.body.appendChild(el);
+    return el;
+  }
 
-/**
- * Tampilkan modal “Tarik Master & Data Aktual dulu”
- * - message: string (opsional)
- * - onGo: callback ketika user klik "Ke Beranda"
- */
-function showPullRequiredModal(message='', onGo=()=>{}){
-  const el = _ensureInfoModal();
-  const body = el.querySelector('#pull-required-body');
-  body.innerHTML = message || 'Beberapa data yang diperlukan belum tersedia di perangkat ini.';
-  const modal = new bootstrap.Modal(el, { backdrop:'static', keyboard:false });
-  el.querySelector('#pull-required-go').onclick = ()=>{
-    modal.hide();
-    onGo();
-  };
-  modal.show();
-}
+  /**
+   * Tampilkan modal “Tarik Master & Data Aktual dulu”
+   * - message: string (opsional)
+   * - onGo: callback ketika user klik "Ke Beranda"
+   */
+  function showPullRequiredModal(message='', onGo=()=>{}){
+    const el = _ensureInfoModal();
+    const body = el.querySelector('#pull-required-body');
+    body.innerHTML = message || 'Beberapa data yang diperlukan belum tersedia di perangkat ini.';
+    const modal = new bootstrap.Modal(el, { backdrop:'static', keyboard:false });
+    el.querySelector('#pull-required-go').onclick = ()=>{
+      modal.hide();
+      onGo();
+    };
+    modal.show();
+  }
 
-/**
- * Guard siap pakai:
- * Jika data belum hangat → munculkan modal & arahkan ke Beranda.
- * return Promise<boolean> → true jika OK untuk lanjut, false jika dialihkan.
- */
-async function requireWarmOrRedirect(opts = {}){
-  // opsional: jika halaman lain sudah membuka progress, jangan dobel.
-  try{
-    await STORE?.ensureWarm?.(); // kalau sudah hangat, ini cepat
-  }catch(_){/* abaikan */}
+  /**
+   * Guard siap pakai:
+   * Jika data belum hangat → munculkan modal & arahkan ke Beranda.
+   * return Promise<boolean> → true jika OK untuk lanjut, false jika dialihkan.
+   */
+  async function requireWarmOrRedirect(opts = {}){
+    try{
+      await STORE?.ensureWarm?.(); // kalau sudah hangat, ini cepat
+    }catch(_){/* abaikan */}
 
-  const { ok, missing } = _isWarm(opts);
-  if(ok) return true;
+    const { ok, missing } = _isWarm(opts);
+    if(ok) return true;
 
-  const msg = `
-    <div>Data yang belum tersedia:</div>
-    ${missing.masters.length ? `<div class="mt-1">Master: <code>${missing.masters.join(', ')}</code></div>` : ''}
-    ${missing.actuals.length ? `<div class="mt-1">Actuals: <code>${missing.actuals.join(', ')}</code></div>` : ''}
-  `;
-  showPullRequiredModal(msg, ()=>{
-    // arahkan ke beranda
-    location.hash = '#/home';
-  });
-  return false;
-}
+    const msg = `
+      <div>Data yang belum tersedia:</div>
+      ${missing.masters.length ? `<div class="mt-1">Master: <code>${missing.masters.join(', ')}</code></div>` : ''}
+      ${missing.actuals.length ? `<div class="mt-1">Actuals: <code>${missing.actuals.join(', ')}</code></div>` : ''}
+    `;
+    showPullRequiredModal(msg, ()=>{
+      // arahkan ke beranda (gunakan '#/' karena router Anda renderHome di '#/')
+      location.hash = '#/';
+    });
+    return false;
+  }
 
-// ====== [GLOBAL PROGRESS HELPERS] cegah double progress ======
-function progressIsOpen(){
-  const el = document.getElementById('progressModal');
-  return !!(el && el.classList.contains('show'));
-}
-function safeProgressOpen(title='Memproses...'){
-  if (progressIsOpen()) return false; // ada yg sudah buka
-  U.progressOpen(title);
-  return true;
-}
+  // ====== [GLOBAL PROGRESS HELPERS] ======
+  // Pastikan DOM modal progress tersedia
+  function ensureProgressModalDom(){
+    let modalEl = document.getElementById('progressModal');
+    if(!modalEl){
+      modalEl = document.createElement('div');
+      modalEl.id = 'progressModal';
+      modalEl.className = 'modal fade';
+      modalEl.tabIndex = -1;
+      modalEl.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header py-2">
+              <h5 class="modal-title">Memproses...</h5>
+            </div>
+            <div class="modal-body">
+              <div class="progress" role="progressbar" aria-label="Progress">
+                <div id="progressBar" class="progress-bar" style="width:0%">0%</div>
+              </div>
+              <div id="progressText" class="small mt-2 text-muted">Menyiapkan...</div>
+            </div>
+          </div>
+        </div>`;
+      document.body.appendChild(modalEl);
+    }
+    return modalEl;
+  }
+
+  let progressModalInst = null;
+
+  function progressOpen(title='Memproses...'){
+    const modalEl = ensureProgressModalDom();
+    const titleEl = qs('.modal-title', modalEl);
+    if(titleEl) titleEl.textContent = title;
+
+    progressModalInst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl, {backdrop:'static'});
+    progressModalInst.show();
+    progress(0, 'Menyiapkan...');
+  }
+
+  function progress(val, text=''){
+    const bar = document.getElementById('progressBar');
+    const t   = document.getElementById('progressText');
+    if(bar){
+      const v = Math.max(0, Math.min(100, Number(val)||0));
+      bar.style.width   = `${v}%`;
+      bar.textContent   = `${v}%`;
+    }
+    if(t && text) t.textContent = text;
+  }
+
+  function progressClose(){
+    const el = document.getElementById('progressModal');
+    const inst = progressModalInst || (el && bootstrap.Modal.getInstance(el));
+    if(inst){ inst.hide(); }
+    progressModalInst = null;
+  }
+
+  /** Cek apakah modal progress sedang "show" */
+  function progressIsOpen(){
+    const el = document.getElementById('progressModal');
+    return !!(el && el.classList.contains('show'));
+  }
+
+  /** Safe open: hanya buka kalau belum ada yang buka */
+  function safeProgressOpen(title='Memproses...'){
+    if (progressIsOpen()) return false;
+    progressOpen(title);
+    return true;
+  }
+
+  /** Hard close: sapu bersih sisa backdrop & state body */
+  function progressHardClose(){
+    try{
+      const el = document.getElementById('progressModal');
+      if(el){
+        const inst = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el, {backdrop:'static'});
+        inst.hide();
+      }
+      // hapus backdrop tersisa
+      document.querySelectorAll('.modal-backdrop.show').forEach(b=> b.remove());
+      // pulihkan body
+      document.body.classList.remove('modal-open');
+      document.body.style.removeProperty('padding-right');
+    }catch(_){ /* no-op */ }
+  }
 
   // Debounce
   function debounce(fn, delay=500){
@@ -233,23 +285,6 @@ function safeProgressOpen(title='Memproses...'){
     setTimeout(()=>div.remove(), 3500);
   }
 
-  // Progress modal controls
-  let progressModalInst = null;
-  function progressOpen(title='Memproses...'){
-    const modalEl = document.getElementById('progressModal');
-    qs('.modal-title', modalEl).textContent = title;
-    const m = new bootstrap.Modal(modalEl, {backdrop:'static'});
-    progressModalInst = m;
-    m.show(); progress(0, 'Menyiapkan...');
-  }
-  function progress(val, text=''){
-    const bar = document.getElementById('progressBar');
-    const t = document.getElementById('progressText');
-    bar.style.width = `${val}%`; bar.textContent = `${val}%`;
-    if(text) t.textContent = text;
-  }
-  function progressClose(){ if(progressModalInst){ progressModalInst.hide(); progressModalInst=null; } }
-
   // Online status
   function updateOnlineBadge(){
     const b = document.getElementById('online-status');
@@ -262,5 +297,12 @@ function safeProgressOpen(title='Memproses...'){
   window.addEventListener('offline', updateOnlineBadge);
 
   // expose
-  return { S, qs, qsa, fmt, htmlBR, debounce, toast, progressOpen, progressClose, progress, updateOnlineBadge, requireWarmOrRedirect, progressIsOpen, safeProgressOpen };
+  return {
+    S, qs, qsa, fmt, htmlBR,
+    debounce, toast,
+    progressOpen, progressClose, progress,
+    updateOnlineBadge,
+    // guards & progress utils
+    requireWarmOrRedirect, progressIsOpen, safeProgressOpen, progressHardClose
+  };
 })();
