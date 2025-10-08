@@ -29,9 +29,21 @@ Pages.ktu = async function(){
     return `${y}-${m}`;
   };
 
+  
+  // >>> TAMBAHKAN: default periode = bulan depan (WIB)
+  const nextMonthYM = ()=>{
+    const tz = 'Asia/Jakarta';
+    const now = new Date();
+    const y  = Number(new Intl.DateTimeFormat('id-ID',{timeZone:tz,year:'numeric'}).format(now));
+    const m  = Number(new Intl.DateTimeFormat('id-ID',{timeZone:tz,month:'2-digit'}).format(now));
+    const ny = m===12 ? y+1 : y;
+    const nm = m===12 ? 1 : (m+1);
+    return `${ny}-${String(nm).padStart(2,'0')}`;
+  };
+
   let items = [];
   let masters = { ydivisi:[], yrayon:[], yestate:[] };
-  let filters = { periode:'', divisi_id:'', rayon_id:'', estate_id:'' };
+    let filters = { periode: nextMonthYM(), divisi_id:'', rayon_id:'', estate_id:'' };
 
 // ---- Index helper (cepat & tegas) ----
 function _lc(v){ return v==null ? '' : String(v).trim().toLowerCase(); }
@@ -303,7 +315,9 @@ async function load(preferLocal=true){
   }
 
   function render(){
-    const periodes = Array.from(new Set(items.map(r=> r.periode))).sort().reverse();
+    const perSet = new Set(items.map(r=> r.periode));
+    if (filters.periode) perSet.add(filters.periode);
+    const periodes = Array.from(perSet).filter(Boolean).sort().reverse();
     const estates  = masters.yestate;
     const rayons   = masters.yrayon;
     const divisies = masters.ydivisi;

@@ -270,6 +270,60 @@ window.U = (function(){
     }catch(_){ /* no-op */ }
   }
 
+    // ====== SAFE DOM HELPERS (tahan null) ======
+  const safe = {
+    text(el, v){ if (el) el.textContent = v; },
+    html(el, v){ if (el) el.innerHTML = v; },
+    toggle(el, cls, on){ if (el && el.classList) el.classList.toggle(cls, !!on); },
+    add(el, cls){ if (el && el.classList) el.classList.add(cls); },
+    remove(el, cls){ if (el && el.classList) el.classList.remove(cls); },
+    show(el, disp='block'){ if (el) el.style.display = disp; },
+    hide(el){ if (el) el.style.display = 'none'; },
+    attr(el, k, v){
+      if (!el) return;
+      if (v===undefined) return el.getAttribute(k);
+      el.setAttribute(k, v);
+    }
+  };
+
+  // ====== ALERT MODAL SEDERHANA (fallback ke window.alert) ======
+  function ensureAlertModalDom(){
+    let el = document.getElementById('u-alert-modal');
+    if(el) return el;
+    el = document.createElement('div');
+    el.id = 'u-alert-modal';
+    el.className = 'modal fade';
+    el.tabIndex = -1;
+    el.innerHTML = `
+      <div class="modal-dialog"><div class="modal-content">
+        <div class="modal-header py-2">
+          <h5 class="modal-title" id="u-alert-title">Informasi</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="u-alert-body">-</div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">OK</button>
+        </div>
+      </div></div>`;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function alert(msg, title='Informasi'){
+    try{
+      const el = ensureAlertModalDom();
+      const t  = el.querySelector('#u-alert-title');
+      const b  = el.querySelector('#u-alert-body');
+      if (t) t.textContent = String(title||'Informasi');
+      if (b) b.innerHTML   = htmlBR(msg||'');
+      const modal = bootstrap.Modal.getOrCreateInstance(el, {backdrop:'static'});
+      modal.show();
+    }catch(_){
+      // fallback jika Bootstrap belum ada
+      window.alert(String(msg||''));
+    }
+  }
+
   // Debounce
   function debounce(fn, delay=500){
     let t=null; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), delay); };
@@ -303,6 +357,147 @@ window.U = (function(){
     progressOpen, progressClose, progress,
     updateOnlineBadge,
     // guards & progress utils
-    requireWarmOrRedirect, progressIsOpen, safeProgressOpen, progressHardClose
+    requireWarmOrRedirect, progressIsOpen, safeProgressOpen, progressHardClose,
+    // baru
+    safe, alert
   };
+})();
+
+
+// === KPL CCTV: tap write/read ke kpl.actual.pdo_draft + normalisasi divisi ===
+(function(){
+  const KEY = 'kpl.actual.pdo_draft';
+
+  // buffer log global (bisa dibuka lewat window.__KPL_TAP)
+  window.__KPL_TAP = window.__KPL_TAP || { logs: [], warn: [] };
+
+  // util: ambil stack pendek (file:line)
+  function shortStack(){
+    try{
+      const s = new Error().stack || '';
+      // buang baris pertama ("Error")
+      return s.split('\n').slice(2, 8).map(l=>l.trim()).join(' ⟂ ');
+    }catch(_){ return '(no stack)'; }
+  }
+
+  // util: deep find prop name
+  function hasPropDeep(obj, name){
+    try{
+      const seen = new WeakSet();
+      const dfs = (o)=>{
+        if (!o || typeof o!=='object' || seen.has(o)) return false;
+        seen.add(o);
+        if (Object.prototype.hasOwnProperty.call(o, name)) return true;
+        return Object.values(o).some(v=> dfs(v));
+      };
+      return dfs(obj);
+    }catch(_){ return false; }
+  }
+
+  // util: NORMALISASI divisi_xxx -> divisi_id (hanya untuk pdo_draft)
+  function normalizeDivisiId(arr){
+    let changed = false;
+    const out = (Array.isArray(arr)? arr : []).map(row=>{
+      if (!row || typeof row!=='object') return row;
+      const r = {...row};
+      // jika ada divisi_kode tapi tidak ada divisi_id → angkat jadi divisi_id
+      if (!r.divisi_id && r.divisi_kode){
+        r.divisi_id = String(r.divisi_kode).trim();
+        changed = true;
+      }
+      // jika ada divisi (lama) dan belum ada divisi_id → pakai divisi
+      if (!r.divisi_id && r.divisi){
+        r.divisi_id = String(r.divisi).trim();
+        changed = true;
+      }
+      return r;
+    });
+    return { out, changed };
+  }
+
+  // PATCH 1: tap U.S.set (prioritas)
+  if (window.U && U.S && typeof U.S.set === 'function'){
+    const _set = U.S.set.bind(U.S);
+    U.S.set = function(k, v){
+      if (k === KEY){
+        // normalisasi sebelum simpan
+        let payload = v;
+        const norm = normalizeDivisiId(payload);
+        if (norm.changed) payload = norm.out;
+
+        // CCTV log
+        const log = {
+          when: new Date().toISOString(),
+          action: 'SET',
+          stack: shortStack(),
+          size: Array.isArray(payload) ? payload.length : '(not array)',
+          has_divisi_kode: hasPropDeep(payload, 'divisi_kode'),
+          sample: Array.isArray(payload) ? payload[0] : payload
+        };
+        window.__KPL_TAP.logs.push(log);
+        try{ console.groupCollapsed('[CCTV][SET] kpl.actual.pdo_draft'); console.log(log); console.groupEnd(); }catch(_){}
+
+        // peringatan jika masih ada divisi_kode
+        if (log.has_divisi_kode){
+          const msg = `[CCTV] WARNING: payload untuk ${KEY} masih memuat "divisi_kode". Sumber stack: ${log.stack}`;
+          window.__KPL_TAP.warn.push({ when: log.when, msg });
+          try{ console.warn(msg); }catch(_){}
+        }
+        return _set(k, payload);
+      }
+      return _set(k, v);
+    };
+  }
+
+  // PATCH 2: tap U.S.get (untuk melihat siapa pembaca pertama)
+  if (window.U && U.S && typeof U.S.get === 'function'){
+    const _get = U.S.get.bind(U.S);
+    U.S.get = function(k, def){
+      const out = _get(k, def);
+      if (k === KEY){
+        const log = {
+          when: new Date().toISOString(),
+          action: 'GET',
+          stack: shortStack(),
+          size: Array.isArray(out) ? out.length : '(not array)',
+          has_divisi_kode: hasPropDeep(out, 'divisi_kode')
+        };
+        window.__KPL_TAP.logs.push(log);
+        try{ console.groupCollapsed('[CCTV][GET] kpl.actual.pdo_draft'); console.log(log); console.groupEnd(); }catch(_){}
+      }
+      return out;
+    };
+  }
+
+  // PATCH 3 (opsional): tap API.call untuk melihat apakah backend pernah mengirim divisi_kode
+  if (window.API && typeof API.call === 'function'){
+    const _call = API.call.bind(API);
+    API.call = async function(name, payload){
+      const res = await _call(name, payload);
+      try{
+        const has = (obj)=> hasPropDeep(obj, 'divisi_kode');
+        if (has(res)){
+          const log = {
+            when: new Date().toISOString(),
+            action: 'API',
+            endpoint: name,
+            stack: shortStack(),
+            has_divisi_kode: true
+          };
+          window.__KPL_TAP.logs.push(log);
+          console.warn('[CCTV][API] Response mengandung "divisi_kode"', log);
+        }
+      }catch(_){}
+      return res;
+    };
+  }
+
+  // PANEL KECIL (opsional): ketuk F9 → buka ringkasan
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'F9'){
+      const d = window.__KPL_TAP;
+      alert(`[CCTV] Logs: ${d.logs.length} entri\nWarnings: ${d.warn.length}\nCek console untuk detail.`);
+      try{ console.table(d.logs.map(x=>({when:x.when,action:x.action, size:x.size, api:x.endpoint||'', has_divisi_kode:x.has_divisi_kode}))); }catch(_){}
+    }
+  });
 })();

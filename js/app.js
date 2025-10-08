@@ -1,5 +1,7 @@
 // js/app.js
 window.addEventListener('DOMContentLoaded', () => {
+
+  
   const root = U.qs('#app-root');
   const btnLogout = U.qs('#btn-logout');
   const btnTheme = U.qs('#btn-theme');
@@ -37,7 +39,7 @@ window.addEventListener('DOMContentLoaded', () => {
     U.qs('#btn-login').onclick = async ()=>{
       const u = U.qs('#login-username').value.trim();
       const p = U.qs('#login-password').value;
-      U.qs('#login-spin').classList.remove('d-none');
+      const spin = U.qs('#login-spin'); U.safe.remove(spin, 'd-none');
       try{
         const r = await API.call('login', {username:u, password:p});
         if(r.ok){
@@ -48,117 +50,195 @@ window.addEventListener('DOMContentLoaded', () => {
           U.toast(r.error||'Login gagal.','danger');
         }
       }catch(e){ U.toast(e.message,'danger'); }
-      finally{ U.qs('#login-spin').classList.add('d-none'); }
+      finally{ U.safe.add(spin, 'd-none'); }
     };
   }
 
   // === MENU & ROUTING BARU (group + submenu) ===
   function buildMenu(){
-    const m = U.qs('#main-menu'); m.innerHTML='';
-    const s = SESSION.get();
-    activeUser.textContent = s ? `${s.profile.username} · ${s.profile.role}` : '-';
-    btnLogout.classList.toggle('d-none', !s);
+  const m = U.qs('#main-menu'); m.innerHTML='';
+  const s = SESSION.get();
+  U.safe.text(activeUser, s ? `${s.profile.username} · ${s.profile.role}` : '-');
+  U.safe.toggle(btnLogout, 'd-none', !s);
 
-    // helper buat item link biasa
-    const addItem = (hash, label) => {
-      const li=document.createElement('li'); li.className='nav-item';
-      li.innerHTML=`<a class="nav-link" href="${hash}">${label}</a>`;
-      m.appendChild(li);
-      li.querySelector('a').addEventListener('click', ()=>{
-        const nav = document.getElementById('navContent'); const bs=bootstrap.Collapse.getInstance(nav);
-        bs && bs.hide();
+  // === helper link biasa
+  const addItem = (hash, label) => {
+    const li = document.createElement('li'); li.className = 'nav-item';
+    li.innerHTML = `<a class="nav-link" href="${hash}">${label}</a>`;
+    m.appendChild(li);
+    li.querySelector('a').addEventListener('click', ()=>{
+      const nav = document.getElementById('navContent');
+      if (nav) { const bs = bootstrap.Collapse.getInstance(nav); if (bs) bs.hide(); }
+    });
+  };
+
+  // === helper dropdown (dengan dukungan submenu/dropend)
+  const addDropdown = (title, innerHtml) => {
+    const li = document.createElement('li'); li.className = 'nav-item dropdown';
+    li.innerHTML = `
+      <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">${title}</a>
+      <ul class="dropdown-menu" data-bs-auto-close="outside">${innerHtml}</ul>
+    `;
+    m.appendChild(li);
+
+    // tutup navbar collapse setelah klik salah satu item
+    li.querySelectorAll('a.dropdown-item').forEach(a=>{
+      a.addEventListener('click', ()=>{
+        const nav = document.getElementById('navContent');
+        if (nav) { const bs = bootstrap.Collapse.getInstance(nav); if (bs) bs.hide(); }
       });
-    };
+    });
 
-    // helper buat dropdown
-    const addDropdown = (title, itemsHtml) => {
-      const li=document.createElement('li'); li.className='nav-item dropdown';
-      li.innerHTML = `
-        <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">${title}</a>
-        <ul class="dropdown-menu">
-          ${itemsHtml}
-        </ul>`;
-      m.appendChild(li);
-      // close on click (mobile)
-      li.querySelectorAll('.dropdown-menu a').forEach(a=>{
-        a.addEventListener('click', ()=>{
-          const nav = document.getElementById('navContent'); const bs=bootstrap.Collapse.getInstance(nav);
-          bs && bs.hide();
-        });
+    // enable nested submenu (Bootstrap 5 tidak native)
+    li.querySelectorAll('.dropend').forEach(node=>{
+      const toggle  = node.querySelector('.dropdown-toggle');
+      const subMenu = node.querySelector('.dropdown-menu');
+      if (!toggle || !subMenu) return;
+
+      // hover (desktop)
+      node.addEventListener('mouseenter', ()=>{
+        try{ bootstrap.Dropdown.getOrCreateInstance(toggle, {autoClose:false}).show(); }catch(_){}
       });
-    };
+      node.addEventListener('mouseleave', ()=>{
+        try{ bootstrap.Dropdown.getOrCreateInstance(toggle).hide(); }catch(_){}
+      });
 
-    if(!s){
-      addItem('#/login','Login');
-    }else{
-      const role = s.profile.role;
+      // click (mobile)
+      toggle.addEventListener('click', (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const dd = bootstrap.Dropdown.getOrCreateInstance(toggle, {autoClose:false});
+        const shown = subMenu.classList.contains('show');
+        if (shown) dd.hide(); else dd.show();
+      });
+    });
+  };
 
-      // 1) Beranda
-      addItem('#/','Beranda');
+  // ===== belum login → hanya Beranda + Login
+  if(!s){
+    addItem('#/','Beranda');
+    addItem('#/login','Login');
+    return;
+  }
 
-      // 2) RKB: Form, Draft
-      if(role==='Asisten' || role==='Admin'){
-        addDropdown('RKB', `
-          <li><a class="dropdown-item" href="#/rkb/form">Form</a></li>
-          <li><a class="dropdown-item" href="#/rkb/draft">Draft</a></li>
-        `);
-      }
+  // ===== normalisasi role ke lowercase
+  const roleRaw = s.profile.role || '';
+  const role = (()=>{
+    const x = String(roleRaw).trim().toLowerCase();
+    if (x==='em' || x==='estate manager' || x==='estate-manager') return 'manager';
+    return x; // 'asisten','askep','manager','admin','ktu', ...
+  })();
 
-      // 3) PDO: Form, Draft (DUMMY)
-      if(role==='Asisten' || role==='Admin'){
-        addDropdown('PDO', `
-          <li><a class="dropdown-item" href="#/pdo/form">Form</a></li>
-          <li><a class="dropdown-item" href="#/pdo/draft">Draft</a></li>
-        `);
-      }
+  // 1) Beranda (semua user)
+  addItem('#/','Beranda');
 
-      // 4) RKH: Form, Draft (DUMMY)
-      if(role==='Asisten' || role==='Admin'){
-        addDropdown('RKH', `
-          <li><a class="dropdown-item" href="#/rkh/form">Form</a></li>
-          <li><a class="dropdown-item" href="#/rkh/draft">Draft</a></li>
-        `);
-      }
+  // 2) RKB (Form, Draft, Approval, Rekap RKB)
+  {
+    let html = '';
 
-      // 5) Outbox (tetap top-level)
-      if(role==='Asisten' || role==='Admin'){
-        addItem('#/outbox','Outbox');
-      }
-
-      // 6) Pesan (badge lama dipertahankan)
-      if(role==='Asisten' || role==='Admin'){
-        addItem('#/inbox', `Pesan <span id="badge-inbox" class="badge rounded-pill text-bg-danger ms-1 d-none">0</span>`);
-      }
-
-      // 7) Approval: Askep, Manager (tampilkan sesuai role)
-      if(role==='Askep' || role==='Admin' || role==='Manager'){
-        addDropdown('Approval', `
-          ${(role==='Askep'||role==='Admin') ? `<li><a class="dropdown-item" href="#/approval/askep">Askep</a></li>` : ''}
-          ${(role==='Manager'||role==='Admin') ? `<li><a class="dropdown-item" href="#/approval/manager">Manager</a></li>` : ''}
-        `);
-      }
-
-      // 8) KTU: Rekap RKH, Rekap PDO
-      if(role==='KTU' || role==='Admin'){
-        addDropdown('KTU', `
-          <li><a class="dropdown-item" href="#/ktu/rekap-rkh">Rekap RKH</a></li>
-          <li><a class="dropdown-item" href="#/ktu/rekap-pdo">Rekap PDO</a></li>
-        `);
-      }
-
-      // 9) Settings: Master Data, Upload Data, Reset Password, Pemeliharaan Data
-      if(role==='Admin'){
-        addDropdown('Setting', `
-          <li><a class="dropdown-item" href="#/settings/master">Master Data</a></li>
-          <li><a class="dropdown-item" href="#/settings/upload">Upload Data</a></li>
-          <li><a class="dropdown-item" href="#/settings/reset">Reset Password</a></li>
-          <li><a class="dropdown-item" href="#/settings/maintenance">Pemeliharaan Data</a></li>
-        `);
-      }
+    // Form & Draft (Asisten, Admin)
+    if(role==='asisten' || role==='admin'){
+      html += `
+        <li><a class="dropdown-item" href="#/rkb/form">Form</a></li>
+        <li><a class="dropdown-item" href="#/rkb/draft">Draft</a></li>
+      `;
     }
 
-    updateInboxBadge();
+    // Approval (Askep, Manager, Admin) → submenu
+    if(role==='askep' || role==='manager' || role==='admin'){
+      html += `
+        <li><hr class="dropdown-divider"></li>
+        <li class="dropend">
+          <a class="dropdown-item dropdown-toggle" href="#" data-bs-toggle="dropdown" aria-expanded="false">Approval</a>
+          <ul class="dropdown-menu">
+            ${ (role==='askep'   || role==='admin')   ? `<li><a class="dropdown-item" href="#/rkb/approvals/askep">Askep</a></li>` : '' }
+            ${ (role==='manager' || role==='admin')   ? `<li><a class="dropdown-item" href="#/rkb/approvals/manager">Manager</a></li>` : '' }
+          </ul>
+        </li>
+      `;
+    }
+
+    // Rekap RKB (KTU, Admin)
+    if(role==='ktu' || role==='admin'){
+      html += `
+        <li><hr class="dropdown-divider"></li>
+        <li><a class="dropdown-item" href="#/ktu/rekap-rkb">Rekap RKB</a></li>
+      `;
+    }
+
+    if(html.trim()) addDropdown('RKB', html);
   }
+
+  // 3) PDO (Form, Draft, Approval, Rekap PDO)
+  {
+    let html = '';
+
+    if(role==='asisten' || role==='admin'){
+      html += `
+        <li><a class="dropdown-item" href="#/pdo/form">Form</a></li>
+        <li><a class="dropdown-item" href="#/pdo/draft">Draft</a></li>
+      `;
+    }
+
+    if(role==='askep' || role==='manager' || role==='admin'){
+      html += `
+        <li><hr class="dropdown-divider"></li>
+        <li class="dropend">
+          <a class="dropdown-item dropdown-toggle" href="#" data-bs-toggle="dropdown" aria-expanded="false">Approval</a>
+          <ul class="dropdown-menu">
+            ${ (role==='askep'   || role==='admin')   ? `<li><a class="dropdown-item" href="#/pdo/approvals/askep">Askep</a></li>` : '' }
+            ${ (role==='manager' || role==='admin')   ? `<li><a class="dropdown-item" href="#/pdo/approvals/manager">Manager</a></li>` : '' }
+          </ul>
+        </li>
+      `;
+    }
+
+    if(role==='ktu' || role==='admin'){
+      html += `
+        <li><hr class="dropdown-divider"></li>
+        <li><a class="dropdown-item" href="#/ktu/rekap-pdo">Rekap PDO</a></li>
+      `;
+    }
+
+    if(html.trim()) addDropdown('PDO', html);
+  }
+
+  // 4) RKH (Form & Draft untuk Asisten/Admin)
+  if(role==='asisten' || role==='admin'){
+    addDropdown('RKH', `
+      <li><a class="dropdown-item" href="#/rkh/form">Form</a></li>
+      <li><a class="dropdown-item" href="#/rkh/draft">Draft</a></li>
+    `);
+  }
+
+  // 5) Outbox (tetap) — kalau perlu gabungkan nanti
+  if(role==='asisten' || role==='admin'){
+    addItem('#/outbox','Outbox');
+  }
+
+  // 6) Pesan (tetap)
+  if(role==='asisten' || role==='admin'){
+    addItem('#/inbox', `Pesan <span id="badge-inbox" class="badge rounded-pill text-bg-danger ms-1 d-none">0</span>`);
+  }
+
+  // 7) Setting
+  if(role==='admin'){
+    addDropdown('Setting', `
+      <li><a class="dropdown-item" href="#/settings/master">Master Data</a></li>
+      <li><a class="dropdown-item" href="#/settings/upload">Upload Data</a></li>
+      <li><a class="dropdown-item" href="#/settings/reset">Reset Password</a></li>
+      <li><a class="dropdown-item" href="#/settings/maintenance">Pemeliharaan Data</a></li>
+    `);
+  } else if(role==='asisten'){
+    addDropdown('Setting', `
+      <li><a class="dropdown-item" href="#/settings/master">Master Data (yrate)</a></li>
+    `);
+  }
+
+  // Badge inbox
+  updateInboxBadge();
+}
+
+
 
   // === Badge Pesan (gunakan id lama: #badge-inbox) ===
   function updateInboxBadge(){
@@ -206,58 +286,64 @@ window.addEventListener('DOMContentLoaded', () => {
 
     // --- Normalisasi & redirect hash lama -> baru ---
     const mapOldToNew = {
-      '#/rkb-form':          '#/rkb/form',
-      '#/draft':             '#/rkb/draft',
-      '#/approval-askep':    '#/approval/askep',
-      '#/approval-manager':  '#/approval/manager',
-      '#/ktu':               '#/ktu/rekap-rkh',  // default lama ke rekap RKH
-      '#/settings':          '#/settings/master'
+    '#/rkb-form':          '#/rkb/form',
+    '#/rkb-draft':         '#/rkb/draft',
+    '#/approval-askep':    '#/rkb/approvals/askep',
+    '#/approval-manager':  '#/rkb/approvals/manager',
+    '#/ktu':               '#/ktu/rekap-rkb',
+    '#/settings':          '#/settings/master',
+    // RKH lama → baru (kalau ada link/bookmark lama)
+    '#/rkh-form':          '#/rkh/form',
+    '#/rkh-draft':         '#/rkh/draft',
+    // PDO lama → baru (jaga-jaga)
+    '#/pdo-form':          '#/pdo/form',
+    '#/pdo-draft':         '#/pdo/draft'
     };
 
     hash = hash.replace(/\/+$/, '');
     if (mapOldToNew[hash]) {
-      location.replace(mapOldToNew[hash]);
-      hash = mapOldToNew[hash];
+        location.replace(mapOldToNew[hash]);
+        hash = mapOldToNew[hash];
     }
 
     switch(true){
-      case hash==='#/login':            renderLogin(); break;
-      case hash==='#/':                 renderHome(); break;
+        case hash==='#/login':                    renderLogin(); break;
+        case hash==='#/':                         renderHome(); break;
 
-      // RKB
-      case hash==='#/rkb/form':         Pages.rkbForm(); break;
-      case hash==='#/rkb/draft':        Pages.rkbList('draft'); break;
+        // RKB
+        case hash==='#/rkb/form':                 Pages.rkbForm(); break;
+        case hash==='#/rkb/draft':                Pages.rkbList('draft'); break;
+        case hash==='#/rkb/approvals/askep':      Pages.rkbApprovalsAskep(); break;
+        case hash==='#/rkb/approvals/manager':    Pages.rkbApprovalsManager(); break;
 
-      // PDO (dummy)
-      case hash==='#/pdo/form':         Pages.pdoForm && Pages.pdoForm() || Pages._dummy('PDO Form'); break;
-      case hash==='#/pdo/draft':        Pages.pdoDraft && Pages.pdoDraft() || Pages._dummy('PDO Draft'); break;
+        // PDO
+        case hash==='#/pdo/form':                 Pages.pdoForm(); break;
+        case hash==='#/pdo/draft':                Pages.pdoList('draft'); break;
+        case hash==='#/pdo/approvals/askep':      Pages.pdoApprovalsAskep(); break;
+        case hash==='#/pdo/approvals/manager':    Pages.pdoApprovalsManager(); break;
 
-      // RKH (dummy)
-      case hash==='#/rkh/form':         Pages.rkhForm && Pages.rkhForm() || Pages._dummy('RKH Form'); break;
-      case hash==='#/rkh/draft':        Pages.rkhDraft && Pages.rkhDraft() || Pages._dummy('RKH Draft'); break;
+        // RKH
+        case hash==='#/rkh/form':                 Pages.rkhForm ? Pages.rkhForm() : Pages._dummy('RKH Form'); break;
+        case hash==='#/rkh/draft':                Pages.rkhList ? Pages.rkhList('draft') : Pages._dummy('RKH Draft'); break;
 
-      // Kotak keluar & pesan
-      case hash==='#/outbox':           Pages.rkbList('outbox'); break;
-      case hash==='#/inbox':            Pages.inbox(); break;
+        // Kotak keluar & pesan
+        case hash==='#/outbox':                   Pages.rkbList('outbox'); break;
+        case hash==='#/inbox':                    Pages.inbox(); break;
 
-      // Approval
-      case hash==='#/approval/askep':   Pages.approvalsAskep(); break;
-      case hash==='#/approval/manager': Pages.approvalsManager(); break;
+        // KTU
+        case hash==='#/ktu/rekap-rkb':            Pages.ktu(); break;
+        case hash==='#/ktu/rekap-pdo':            Pages.ktuRekapPDO(); break;
 
-      // KTU
-      case hash==='#/ktu/rekap-rkh':    Pages.ktu(); break;
-      case hash==='#/ktu/rekap-pdo':    Pages.ktuRekapPDO ? Pages.ktuRekapPDO() : Pages._dummy('KTU · Rekap PDO'); break;
+        // Settings
+        case hash==='#/settings/master':          Pages.settingsMaster(); break;
+        case hash==='#/settings/upload':          Pages.settingsUpload(); break;
+        case hash==='#/settings/reset':           Pages.settingsReset(); break;
+        case hash==='#/settings/maintenance':     Pages.settingsMaintenance(); break;
 
-      // Settings
-      case hash==='#/settings/master':       Pages.settingsMaster(); break;
-      case hash==='#/settings/upload':       Pages.settingsUpload(); break;
-      case hash==='#/settings/reset':        Pages.settingsReset(); break;
-      case hash==='#/settings/maintenance':  Pages.settingsMaintenance(); break;
-
-      default:
-        renderHome();
+        default:
+            renderHome();
     }
-  }
+}
 
   function renderHome(){
     const div = document.createElement('div');
@@ -391,30 +477,122 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     };
 
-    // --- Hapus Data Lokal (tanpa logout) ---
-    btnClear.onclick = ()=>{
-      const pass = prompt('Masukkan password aktif untuk konfirmasi:');
-      if(!pass) return;
+    // --- Hapus Data Lokal (soft / hard reset) ---
+btnClear.onclick = async ()=>{
+  const mode = prompt(
+    'Ketik "TOTAL" untuk reset total (hapus SEMUA data lokal & logout).\n' +
+    'Atau kosongkan lalu OK untuk hapus cache aplikasi (tetap login).'
+  );
 
-      const KEEP_PREFIX = ['SESSION', 'theme']; // jika Anda menyimpan preferensi tema dsb.
-      const removeIf = (k) =>
-        k.startsWith('kpl.master.') ||
-        k.startsWith('kpl.actual.') ||
-        k.startsWith('kpl.counter.') ||
-        k.startsWith('rkb.') ||
-        k === 'kpl.cache.ts';
+  // ========= util hapus kunci localStorage by rule =========
+  const removeKeys = (shouldRemoveFn) => {
+    const keys = Object.keys(localStorage);
+    for (const k of keys) {
+      try{
+        if (shouldRemoveFn(k)) localStorage.removeItem(k);
+      }catch(_){}
+    }
+  };
 
-      Object.keys(localStorage).forEach(k=>{
-        if (KEEP_PREFIX.some(pref=> k.startsWith(pref))) return;
-        if (removeIf(k)) localStorage.removeItem(k);
-      });
+  // ========= SOFT RESET: hapus cache aplikasi, tetap login =========
+  const doSoftReset = () => {
+    // Prefix/kunci yang dianggap milik aplikasi (aman dihapus)
+    const APP_PREFIXES = [
+      'kpl.master.', 'kpl.actual.', 'kpl.counter.', 'kpl.cache.',
+      'rkb.', 'pdo.', 'rkh.', 'ktu.', 'inbox.', 'outbox.', 'settings.',
+    ];
+    const APP_EXACT = [
+      'kpl.cache.ts',
+      'pdo.form.buffer', 'pdo.form.readonly',
+      'kpl.actual.pdo_draft',            // <— draft PDO
+      'rkb.form.buffer', 'rkb.form.readonly',
+      'rkh.form.buffer', 'rkh.form.readonly'
+    ];
 
-      // Info UI
-      div.querySelector('#home-pull-log').textContent = 'Cache lokal dibersihkan. Silakan tarik ulang bila perlu.';
-      updateHomeCacheStatus();
-      updateInboxBadge();
-      U.toast('Data lokal dihapus. Sesi login tetap aktif.', 'warning');
-    };
+    removeKeys((k)=>{
+      if (APP_EXACT.includes(k)) return true;
+      if (APP_PREFIXES.some(p=> k.startsWith(p))) return true;
+      return false;
+    });
+
+    // segarkan UI
+    div.querySelector('#home-pull-log').textContent =
+      'Cache aplikasi dibersihkan. Silakan tarik ulang bila perlu.';
+    updateHomeCacheStatus();
+    updateInboxBadge();
+    U.toast('Cache aplikasi dihapus. Sesi login tetap aktif.', 'warning');
+  };
+
+  // ========= HARD RESET: hapus SEMUA storage & cache =========
+  const doHardReset = async () => {
+    try{
+      // 1) localStorage: hapus SEMUA (termasuk SESSION & theme)
+      localStorage.clear();
+    }catch(_){}
+
+    try{
+      // 2) sessionStorage: bersihkan
+      sessionStorage.clear();
+    }catch(_){}
+
+    try{
+      // 3) Cache Storage (PWA/Service Worker caches)
+      if ('caches' in window && typeof caches.keys === 'function') {
+        const names = await caches.keys();
+        await Promise.all(names.map(n=> caches.delete(n)));
+      }
+    }catch(_){}
+
+    try{
+      // 4) IndexedDB: hapus semua database (best-effort; tidak semua browser support .databases())
+      if (indexedDB && typeof indexedDB.databases === 'function') {
+        const dbs = await indexedDB.databases();
+        await Promise.all((dbs||[]).map(db=>{
+          if (db && db.name) return new Promise((resolve)=> {
+            const req = indexedDB.deleteDatabase(db.name);
+            req.onsuccess = req.onerror = req.onblocked = ()=> resolve();
+          });
+          return Promise.resolve();
+        }));
+      } else {
+        // fallback: jika tahu nama DB, bisa hapus manual di sini
+        // contoh: ['kpl-cache','app-db'].forEach(n=> indexedDB.deleteDatabase(n));
+      }
+    }catch(_){}
+
+    try{
+      // 5) Unregister service workers (jika ada)
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r=> r.unregister()));
+      }
+    }catch(_){}
+
+    U.toast('Reset total selesai. Anda akan diminta login ulang.', 'warning');
+    // paksa ke login
+    SESSION.clear && SESSION.clear();
+    buildMenu();
+    routeTo('#/login');
+  };
+
+  if (String(mode||'').toUpperCase() === 'TOTAL') {
+    const really = confirm('Yakin reset TOTAL? Ini akan menghapus SEMUA data lokal & logout.');
+    if (!really) return;
+    U.safeProgressOpen('Reset total data lokal...');
+    try { await doHardReset(); } finally {
+      try{ U.progressClose(); }catch(_){}
+      U.progressHardClose();
+    }
+    return;
+  }
+
+  // default: soft reset (hapus cache aplikasi saja)
+  const reallySoft = confirm(
+    'Hapus cache aplikasi (master, actuals, draft RKB/PDO, counters) tetapi tetap login?'
+  );
+  if (!reallySoft) return;
+  doSoftReset();
+};
 
     // Ubah password
     div.querySelector('#btn-change-pass').onclick = async ()=>{

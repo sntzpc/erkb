@@ -63,6 +63,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script>window.jsPDF = window.jspdf.jsPDF;</script>
   <script>window.GAS_URL = "https://script.google.com/macros/s/AKfycbxLPqqds1uphvG8eIBgtgtHNZpcHU7swLiUIuXA6J1mhwBcAm4BQIL7KHH3uGv9IUgyNQ/exec"; /* TODO: paste your deployed GAS web app URL */</script>
   <script src="js/utils.js"></script>
   <script src="js/auth.js"></script>
@@ -71,16 +73,32 @@
   <script src="js/storage.js"></script>
 
   <!-- Pages -->
-   <script src="js/pages/inbox.js"></script>
-  <script src="js/pages/rkb_form.js"></script>
-  <script src="js/pages/rkb_list.js"></script>
-  <script src="js/pages/approvals_askep.js"></script>
-  <script src="js/pages/approvals_manager.js"></script>
+  <script src="js/pages/inbox.js"></script>
   <script src="js/pages/ktu.js"></script>
-  <script src="js/pages/settings.master.js"></script>
-  <script src="js/pages/settings.upload.js"></script>
-  <script src="js/pages/settings.reset.js"></script>
-  <script src="js/pages/settings.maintenance.js"></script>
+
+  <!-- master pages -->
+  <script src="js/pages/master/settings.master.js"></script>
+  <script src="js/pages/master/settings.upload.js"></script>
+  <script src="js/pages/master/settings.reset.js"></script>
+  <script src="js/pages/master/settings.maintenance.js"></script>
+
+  <!-- RKB -->
+  <script src="js/pages/rkb/rkb_form.js"></script>
+  <script src="js/pages/rkb/rkb_list.js"></script>
+  <script src="js/pages/rkb/rkb_approvals_askep.js"></script>
+  <script src="js/pages/rkb/rkb_approvals_manager.js"></script>
+
+  <!-- PDO -->
+  <script src="js/pages/pdo/exporter_pdo.js"></script>
+  <script src="js/pages/pdo/pdo_form.js"></script>
+  <script src="js/pages/pdo/pdo_list.js"></script>
+  <script src="js/pages/pdo/pdo_approvals_askep.js"></script>
+  <script src="js/pages/pdo/pdo_approvals_manager.js"></script>
+  <script src="js/pages/pdo/ktu_rekap_pdo.js"></script>
+
+    <!-- RKH -->
+  <script src="js/pages/rkh/rkh_form.js"></script>
+  <script src="js/pages/rkh/rkh_list.js"></script>
 
   <script>
     if ('serviceWorker' in navigator) {
@@ -89,5 +107,6 @@
       });
     }
   </script>
+
 </body>
 </html>

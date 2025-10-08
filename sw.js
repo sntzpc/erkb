@@ -1,4 +1,4 @@
-const CACHE = 'rkb-app-v1.26';
+const CACHE = 'rkb-app-v1.34';
 const ASSETS = [
   './',
   './index.html',
@@ -7,15 +7,22 @@ const ASSETS = [
   './js/auth.js',
   './js/app.js',
   './js/pages/inbox.js',
-  './js/pages/rkb_form.js',
-  './js/pages/rkb_list.js',
-  './js/pages/approvals_askep.js',
-  './js/pages/approvals_manager.js',
+  './js/pages/rkb/rkb_form.js',
+  './js/pages/rkb/rkb_list.js',
+  './js/pages/rkb/rkb_approvals_askep.js',
+  './js/pages/rkb/rkb_approvals_manager.js',
+  './js/pages/pdo/pdo_form.js',
+  './js/pages/pdo/pdo_list.js',
+  './js/pages/pdo/pdo_approvals_askep.js',
+  './js/pages/pdo/pdo_approvals_manager.js',
+  './js/pages/pdo/ktu_rekap_pdo.js',
+  './js/pages/rkh/rkh_form.js',
+  './js/pages/rkh/rkh_list.js',
   './js/pages/ktu.js',
-  '/js/pages/settings.master.js',
-  '/js/pages/settings.upload.js',
-  '/js/pages/settings.reset.js',
-  '/js/pages/settings.maintenance.js',
+  '/js/pages/master/settings.master.js',
+  '/js/pages/master/settings.upload.js',
+  '/js/pages/master/settings.reset.js',
+  '/js/pages/master/settings.maintenance.js',
   './icons/icon-192x192.png',
   './manifest.json'
 ];

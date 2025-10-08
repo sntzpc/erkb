@@ -27,3 +27,13 @@ table td, table th { white-space: nowrap; }
 }
 
 /* Spinner overlay for long actions (optional, we use modal progress) */
+
+.dropdown-submenu {
+  position: relative;
+}
+
+.dropdown-submenu .dropdown-menu {
+  top: 0;
+  left: 100%;
+  margin-top: -1px;
+}
