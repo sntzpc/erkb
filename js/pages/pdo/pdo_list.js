@@ -719,7 +719,7 @@ function buildDetailHtml(one){
       U.progressOpen('Kirim PDO...'); U.progress(40,'Kirim data');
       const res = await API.call('pushPDOv2', payload);
       if(!res.ok){ throw new Error(res.error||'Gagal sync PDO'); }
-      obj.status = 'ASKP';
+      obj.status = 'submitted';
       obj.updated_at = new Date().toISOString();
       setDrafts(arr); data = arr; sortData(data);
       U.toast('PDO terkirim. Menunggu persetujuan.','success');

@@ -47,8 +47,8 @@ Pages.pdoApprovalsManager = function () {
       if (preferLocal) {
         const cached = getActualPdo();
         if (Array.isArray(cached) && cached.length) {
-          // status menunggu Manager di backend = 'MGR'
-          rows = cached.filter(x => String(x.status||'').toUpperCase() === 'MGR');
+          // status menunggu Manager di backend = 'askep_approved'
+          rows = cached.filter(x => String(x.status||'').toLowerCase() === 'askep_approved');
         }
       }
       if (!rows.length) {

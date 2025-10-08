@@ -105,6 +105,74 @@ hydrateFromActualsIfNeeded();
     return {BHL, SKU, BHB, total: (BHL+SKU+BHB)};
   }
 
+  // === [VALIDATION] helpers ===
+function _str(v){ return String(v ?? '').trim(); }
+function _num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+function _isPos(n){ return _num(n) > 0; }
+function _required(v){ return _str(v).length > 0; }
+
+// pastikan bahan ada di master dan punya no_material
+function findBahanInMaster(name){
+  const key = _str(name).toLowerCase();
+  if(!key) return null;
+  // pakai helper yang sudah ada bila tersedia:
+  const meta = (typeof getBahanMetaByName === 'function') ? getBahanMetaByName(key) : null;
+  if(meta && (meta.no_material||'').trim()) return { nama: name, no_material: meta.no_material, satuan_default: meta.satuan_default||'' };
+
+  // fallback (kalau getBahanMetaByName tidak cover):
+  const hit = (M.bahan||[]).find(b=>{
+    const nm = _str(b.nama_bahan||b.nama||'').toLowerCase();
+    return nm === key;
+  });
+  if(hit){
+    const noMat = _str(hit.no_material||hit.kode||hit.code||hit.id||hit.no||'');
+    if(noMat) return { nama: name, no_material: noMat, satuan_default: _str(hit.satuan_default||hit.satuan||'') };
+  }
+  return null;
+}
+
+// validasi header RKB
+function validateHeaderStrict(){
+  if(!_required(F.periode)) return 'Periode wajib diisi.';
+  if(!_required(F.nomor))   return 'No RKB belum dibuat.';
+  return '';
+}
+
+// validasi satu item pekerjaan
+function validateItemStrict(it){
+  if(!_required(it.pekerjaan)) return 'Jenis Pekerjaan wajib diisi.';
+  if(!Array.isArray(it.lokasi) || it.lokasi.length===0) return 'Lokasi minimal 1 baris.';
+  if(!_isPos(it.volume))  return 'Volume harus > 0.';
+  if(!_required(it.satuan)) return 'Satuan volume wajib diisi.';
+  if(!_isPos(it.hk_unit)) return 'HK/Unit harus > 0.';
+  if(!_required(it.pengawas)) return 'Nama Pengawas wajib diisi.';
+
+  const pBHL = _num(it.pct_bhl), pSKU = _num(it.pct_sku), pBHB = _num(it.pct_bhb);
+  if((pBHL+pSKU+pBHB) !== 100){
+    return 'Persentase HK harus berjumlah tepat 100% (BHL+SKU+BHB).';
+  }
+  return '';
+}
+
+// validasi daftar bahan pada item
+function validateBahanList(list){
+  const arr = Array.isArray(list) ? list : [];
+  for(let i=0; i<arr.length; i++){
+    const b = arr[i];
+    const nm = _str(b.nama);
+    const jm = _num(b.jumlah);
+    const st = _str(b.satuan);
+    // Harus match master + punya no_material
+    const meta = findBahanInMaster(nm);
+    if(!meta){ return `Bahan #${i+1} ("${nm}") tidak valid atau tidak ada di master.`; }
+    if(!_required(meta.no_material)){ return `Bahan #${i+1} ("${nm}") tidak memiliki No Material di master.`; }
+    if(!jm || jm<=0){ return `Bahan #${i+1} ("${nm}") jumlah harus > 0.`; }
+    if(!st){ return `Bahan #${i+1} ("${nm}") satuan wajib diisi.`; }
+  }
+  return '';
+}
+
+
   // Format periode ke YYYY-MM (Asia/Jakarta)
 function fPeriode(p){
   if(!p) return '';
@@ -558,37 +626,56 @@ U.qs('#btn-new').onclick = ()=>{
 
 
   function addBahan(){
-  const nama = U.qs('#bahan-nama').value.trim();
-  const jumlah = parseFloat(U.qs('#bahan-jml').value||0);
-  let satuan = U.qs('#bahan-sat').value.trim();
+  const namaEl = U.qs('#bahan-nama');
+  const jmlEl  = U.qs('#bahan-jml');
+  const satEl  = U.qs('#bahan-sat');
 
-  if(!nama || !jumlah){ U.toast('Nama & jumlah bahan wajib.','warning'); return; }
+  const nama   = _str(namaEl.value);
+  const jumlah = _num(jmlEl.value);
+  let   satuan = _str(satEl.value);
 
-  // Ambil meta dari master (no_material + satuan_default)
-  const meta = getBahanMetaByName(nama);
-  let no_material = '';
-  if(meta){
-    no_material = meta.no_material || '';
-    if(!satuan && meta.satuan_default){ satuan = meta.satuan_default; }
-  }else{
-    // kalau user ketik manual → coba dari dataset yang sebelumnya disimpan oleh initAutoBahan
-    no_material = (U.qs('#bahan-nama').dataset.noMaterial || '').trim();
+  if(!nama){ U.toast('Nama bahan wajib.','warning'); return; }
+
+  // harus ada di master + punya no_material
+  const meta = findBahanInMaster(nama);
+  if(!meta){
+    U.toast(`Bahan "${nama}" tidak ditemukan di master atau belum mempunyai No Material.`, 'warning');
+    return;
+  }
+  if(!_isPos(jumlah)){
+    U.toast('Jumlah bahan harus > 0.', 'warning'); return;
   }
 
-  CUR.bahan.push({ nama, jumlah, satuan, no_material });
+  // isi satuan default bila kosong
+  if(!satuan && meta.satuan_default){ satuan = meta.satuan_default; }
+  if(!satuan){
+    U.toast('Satuan bahan wajib diisi.', 'warning'); return;
+  }
 
-  // Simpan cache lokal satuan jika baru
+  // final push
+  CUR.bahan.push({
+    nama,
+    jumlah,
+    satuan,
+    no_material: meta.no_material
+  });
+
+  // simpan cache satuan (agar auto isi di input selanjutnya)
   const key = nama.toLowerCase();
   if(satuan && !bahanUnitCache[key]){
     bahanUnitCache[key] = satuan;
     U.S.set(BAHAN_UNIT_KEY, bahanUnitCache);
   }
 
-  saveBufferThin(); renderBahan();
-  U.qs('#bahan-nama').value=''; U.qs('#bahan-jml').value=''; U.qs('#bahan-sat').value='';
-  // bersihkan noMaterial temp
-  delete U.qs('#bahan-nama').dataset.noMaterial;
+  saveBufferThin();
+  renderBahan();
+
+  // reset input
+  namaEl.value = '';
+  jmlEl.value = '';
+  satEl.value = '';
 }
+
 
 
   function renderBahan(){
@@ -740,24 +827,34 @@ list.innerHTML = `<table class="table table-sm">
     if(!F.nomor) return 'No RKB belum dibuat.';
     return '';
   }
-  function validateItem(it){
-    if(!it.pekerjaan) return 'Jenis Pekerjaan wajib diisi.';
-    if(!(it.lokasi?.length)) return 'Lokasi belum diisi.';
-    if(!(it.volume>0)) return 'Volume harus > 0.';
-    if(!(it.hk_unit>0)) return 'HK/Unit harus > 0.';
-    return '';
-  }
+function validateItem(it){
+  return validateItemStrict(it); // delegasi ke validasi ketat
+}
 
-  function addItemFromForm(){
-    const errH = validateHeader(); if(errH){ U.toast(errH,'warning'); return; }
-    const err = validateItem(CUR); if(err){ U.toast(err,'warning'); return; }
-    const item = JSON.parse(JSON.stringify(CUR));
-    item.hk = computeHK(item);
-    F.items.unshift(item);
-    CUR = defaultItem(); // reset item form
-    saveBuffer();
-    build();
-  }
+function addItemFromForm(){
+  // validasi header
+  const errH = validateHeaderStrict();
+  if(errH){ U.toast(errH,'warning'); return; }
+
+  // validasi item
+  const errI = validateItemStrict(CUR);
+  if(errI){ U.toast(errI,'warning'); return; }
+
+  // validasi daftar bahan (jika ada)
+  const errB = validateBahanList(CUR.bahan||[]);
+  if(errB){ U.toast(errB,'warning'); return; }
+
+  // lolos semua validasi → simpan
+  const item = JSON.parse(JSON.stringify(CUR));
+  item.hk = computeHK(item);
+  F.items.unshift(item);
+
+  // reset form item
+  CUR = defaultItem();
+  saveBuffer();
+  build();
+}
+
 
   function renderItems(){
     const el = U.qs('#items-table');

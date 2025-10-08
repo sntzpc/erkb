@@ -49,6 +49,24 @@ async function resolveCompanyName(){
   }catch(_){ /* biarkan default */ }
 }
 
+// helper kecil: ambil nilai pertama yang ada dari beberapa kandidat kolom
+function pickFirst(obj, keys){
+  for (const k of keys){
+    const v = obj?.[k];
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+  }
+  return '';
+}
+
+// normalisasi "No. Material" dari berbagai kemungkinan nama kolom
+function getNoMaterial(b){
+  return String(pickFirst(b, [
+    'no_material','noMaterial',
+    'kode','code','material_no','materialNo',
+    'no','id'
+  ]) || '');
+}
+
 
   // Flatten 1 RKB → baris-baris detail (1 baris per bahan; jika tanpa bahan → 1 baris kosong bagian bahan)
 function flattenRkbRows(r){
@@ -91,11 +109,11 @@ function flattenRkbRows(r){
     if(Array.isArray(it.bahan) && it.bahan.length){
       it.bahan.forEach(b=>{
         g.bahanList.push({
-          kode: (b && (b.kode || b.no)) ? (b.kode || b.no) : '',
-          nama: b?.nama || '',
-          jumlah: (b?.jumlah!==undefined && b?.jumlah!==null) ? b.jumlah : '',
-          satuan: b?.satuan || ''
-        });
+  no_material: getNoMaterial(b),
+  nama: b?.nama || '',
+  jumlah: (b?.jumlah!==undefined && b?.jumlah!==null) ? b.jumlah : '',
+  satuan: b?.satuan || ''
+});
       });
     }else{
       // jika item tidak punya bahan, tetap biarkan kosong (tidak menambah apa-apa)
@@ -135,7 +153,7 @@ function flattenRkbRows(r){
     const BHB  = base * (pct_bhb/100);
 
     // Gabungkan bahan (tanpa penjumlahan jumlah!) — setiap kolom digabung per entri
-    const noMat    = g.bahanList.map(b => b.kode).filter(Boolean).join(MATERIAL_SEP);
+    const noMat    = g.bahanList.map(b => b.no_material).filter(Boolean).join(MATERIAL_SEP);
     const namaBhn  = g.bahanList.map(b => b.nama).filter(Boolean).join(MATERIAL_SEP);
     const jumlahB  = g.bahanList.map(b => (b.jumlah!=='' && b.jumlah!==null && b.jumlah!==undefined) ? String(b.jumlah) : '').filter(s=>s!=='').join(MATERIAL_SEP);
     const satuanB  = g.bahanList.map(b => b.satuan).filter(Boolean).join(MATERIAL_SEP);
@@ -554,6 +572,74 @@ async function exportXlsx(){
   XLSX.writeFile(wb, `RKB_Detail_${label}.xlsx`);
 }
 
+// ===== Digital Signatures (timestamp) =====
+
+// coba ambil field timestamp dari berbagai sumber
+function pickFirstNonEmpty(obj, keys){
+  for(const k of keys){
+    const v = obj && obj[k];
+    if(v!==undefined && v!==null && String(v).trim()!=='') return v;
+  }
+  return '';
+}
+
+// format ke dd/MM/yy-HH:mm:ss (Asia/Jakarta). Input boleh ISO, epoch, atau string lain.
+function fmtWIB(ts){
+  if(!ts) return '';
+  let d = ts instanceof Date ? ts : new Date(ts);
+  if(isNaN(d)) return String(ts); // biarkan apa adanya bila tidak parseable
+  const tz = 'Asia/Jakarta';
+  const dd = new Intl.DateTimeFormat('id-ID',{timeZone:tz,day:'2-digit'}).format(d);
+  const mm = new Intl.DateTimeFormat('id-ID',{timeZone:tz,month:'2-digit'}).format(d);
+  const yy = new Intl.DateTimeFormat('id-ID',{timeZone:tz,year:'2-digit'}).format(d);
+  const hh = new Intl.DateTimeFormat('id-ID',{timeZone:tz,hour:'2-digit',hour12:false}).format(d);
+  const mi = new Intl.DateTimeFormat('id-ID',{timeZone:tz,minute:'2-digit'}).format(d);
+  const ss = new Intl.DateTimeFormat('id-ID',{timeZone:tz,second:'2-digit'}).format(d);
+  return `${dd}/${mm}/${yy}-${hh}:${mi}:${ss}`;
+}
+
+// Ambil timestamp tanda tangan dari: row langsung → actuals.rkb → komentar (rkb_comments)
+function resolveSignTimes(r){
+  const out = { asisten_ts:'', askep_ts:'', manager_ts:'' };
+
+  // 1) langsung dari row (kalau ada)
+  out.asisten_ts = pickFirstNonEmpty(r, ['created_ts','asisten_ts','created_at']);
+  out.askep_ts   = pickFirstNonEmpty(r, ['askep_ts','askep_approved_at','approved_at']);
+  out.manager_ts = pickFirstNonEmpty(r, ['manager_ts','manager_approved_at','full_approved_at']);
+
+  // 2) fallback dari actuals.rkb (kalau tersedia field ts)
+  try{
+    const allRkb = (STORE?.getActualsRkb && STORE.getActualsRkb()) || [];
+    const row = allRkb.find(x => String(x.nomor)===String(r.nomor));
+    if(row){
+      out.asisten_ts = out.asisten_ts || pickFirstNonEmpty(row, ['created_ts','asisten_ts','created_at']);
+      out.askep_ts   = out.askep_ts   || pickFirstNonEmpty(row, ['askep_ts','askep_approved_at','approved_at']);
+      out.manager_ts = out.manager_ts || pickFirstNonEmpty(row, ['manager_ts','manager_approved_at','full_approved_at']);
+    }
+  }catch(_){}
+
+  // 3) fallback terakhir dari komentar (rkb_comments)
+  try{
+    const comments = (STORE?.getActual && STORE.getActual('rkb_comments')) || [];
+    const mine = comments.filter(c => String(c.nomor)===String(r.nomor));
+    const tsOf = (role)=>{
+      const rows = mine.filter(c => String(c.role||'').toLowerCase()===role);
+      // ambil timestamp paling baru
+      rows.sort((a,b)=> new Date(b.updated_at||b.created_at||0) - new Date(a.updated_at||a.created_at||0));
+      const top = rows[0];
+      return pickFirstNonEmpty(top||{}, ['ts','timestamp','updated_at','created_at']);
+    };
+    out.askep_ts   = out.askep_ts   || tsOf('askep');
+    out.manager_ts = out.manager_ts || tsOf('manager');
+  }catch(_){}
+
+  // format Waktu
+  return {
+    asisten_ts: out.asisten_ts ? fmtWIB(out.asisten_ts) : '',
+    askep_ts  : out.askep_ts   ? fmtWIB(out.askep_ts)   : '',
+    manager_ts: out.manager_ts ? fmtWIB(out.manager_ts) : ''
+  };
+}
 
 // ===== Cetak PDF (per-periode) =====
 async function printPdf(){
@@ -562,99 +648,186 @@ async function printPdf(){
   if(!arr.length){ U.toast('Tidak ada data untuk dicetak.','warning'); return; }
 
   const sections = await Promise.all(arr.map(async (r) => {
-  // nama penandatangan
-  const sign = await resolveSignersByContext({
-    estate_id:   r.estate_id,
-    rayon_id:    r.rayon_id,
-    divisi_id:   r.divisi_id,
-    divisi:      r.divisi,
-    estate_full: r.estate_full
-  });
+    // nama penandatangan dan timestamp digital
+    const sign = await resolveSignersByContext({
+      estate_id:   r.estate_id,
+      rayon_id:    r.rayon_id,
+      divisi_id:   r.divisi_id,
+      divisi:      r.divisi,
+      estate_full: r.estate_full
+    });
+    const sigts = resolveSignTimes(r);
 
-  // inflate items dari actuals bila kosong
-  const items = (Array.isArray(r.items) && r.items.length)
-    ? r.items
-    : (typeof itemsFromActuals === 'function' ? itemsFromActuals(r.nomor) : []);
+    // inflate items dari actuals bila kosong
+    const items = (Array.isArray(r.items) && r.items.length)
+      ? r.items
+      : (typeof itemsFromActuals === 'function' ? await itemsFromActuals(r.nomor) : []);
 
-  // kolom "Jumlah" multiline → format angka per baris
-  const fmtJumlah = (s) => String(s ?? '')
-    .split('\n')
-    .map(t => t.trim() ? U.fmt.id0(t) : '')
-    .join('\n');
+    // kolom "Jumlah" multiline → format angka per baris
+    const fmtJumlah = (s) => String(s ?? '')
+      .split('\n')
+      .map(t => t.trim() ? U.fmt.id0(t) : '')
+      .join('\n');
 
-  const rows = flattenRkbRows({ ...r, items }).map(obj => `
-    <tr>
-      <td>${obj['Activity Type']}</td>
-      <td>${obj['Jenis Pekerjaan']}</td>
-      <td>${U.htmlBR(obj['Lokasi'])}</td>
-      <td class="t-right">${U.fmt.id2(obj['Volume Kerja'])}</td>
-      <td>${obj['Satuan']}</td>
-      <td class="t-right">${U.fmt.id2(obj['HK/Unit'])}</td>
-      <td class="t-right">${U.fmt.id2(obj['BHL'])}</td>
-      <td class="t-right">${U.fmt.id2(obj['SKU'])}</td>
-      <td class="t-right">${U.fmt.id2(obj['BHB'])}</td>
-      <td>${U.htmlBR(obj['No. Material'])}</td>
-      <td>${U.htmlBR(obj['Nama Bahan'])}</td>
-      <td class="t-right">${U.htmlBR(fmtJumlah(obj['Jumlah']))}</td>
-      <td>${U.htmlBR(obj['Sat. Bahan'])}</td>
-      <td>${obj['Nama Pengawas']}</td>
-    </tr>
-  `).join('');
+    // data → rows HTML
+    const rows = flattenRkbRows({ ...r, items }).map(obj => `
+      <tr>
+        <td>${obj['Activity Type']||''}</td>
+        <td>${obj['Jenis Pekerjaan']||''}</td>
+        <td class="wrap">${U.htmlBR(obj['Lokasi']||'')}</td>
+        <td class="num t-right">${U.fmt.id2(obj['Volume Kerja']||0)}</td>
+        <td class="num">${obj['Satuan']||''}</td>
+        <td class="num t-right">${U.fmt.id2(obj['HK/Unit']||0)}</td>
+        <td class="num t-right">${U.fmt.id2(obj['BHL']||0)}</td>
+        <td class="num t-right">${U.fmt.id2(obj['SKU']||0)}</td>
+        <td class="num t-right">${U.fmt.id2(obj['BHB']||0)}</td>
+        <td class="wrap">${U.htmlBR(obj['No. Material']||'')}</td>
+        <td class="wrap">${U.htmlBR(obj['Nama Bahan']||'')}</td>
+        <td class="num t-right">${U.htmlBR(fmtJumlah(obj['Jumlah']))}</td>
+        <td class="num">${U.htmlBR(obj['Sat. Bahan']||'')}</td>
+        <td>${obj['Nama Pengawas']||''}</td>
+      </tr>
+    `).join('');
 
-  return `
-    <section class="page">
-      <h2 class="company">${COMPANY_NAME}</h2>
-      <div class="estate">${r.estate_full||''}</div>
-      <h3 class="title">RENCANA KERJA BULANAN</h3>
+    return `
+      <section class="page">
+        <div class="hdr">
+          <div class="hdr-left">
+            <div class="company">${(COMPANY_NAME||'').toUpperCase()}</div>
+            <div class="estate">${(r.estate_full||'').toUpperCase()}</div>
+            <div class="title">RENCANA KERJA BULANAN</div>
 
-      <div class="meta">
-        <div><b>Periode</b>: ${fPeriode(r.periode)||'-'}</div>
-        <div><b>Divisi</b>: ${r.divisi||'-'}</div>
-        <div><b>No RKB</b>: ${r.nomor||'-'}</div>
-      </div>
+            <table class="meta">
+              <tr><td>Periode</td><td>:</td><td>${fPeriode(r.periode)||'-'}</td></tr>
+              <tr><td>Divisi</td><td>:</td><td>${r.divisi||'-'}</td></tr>
+              <tr><td>No RKB</td><td>:</td><td>${r.nomor||'-'}</td></tr>
+            </table>
+          </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Activity Type</th><th>Jenis Pekerjaan</th><th>Lokasi</th>
-            <th class="t-right">Volume Kerja</th><th>Satuan</th><th class="t-right">HK/Unit</th>
-            <th class="t-right">BHL</th><th class="t-right">SKU</th><th class="t-right">BHB</th>
-            <th>No. Material</th><th>Nama Bahan</th><th class="t-right">Jumlah</th><th>Sat.</th>
-            <th>Nama Pengawas</th>
-          </tr>
-        </thead>
-        <tbody>${rows || `<tr><td colspan="14" class="muted">Tidak ada detail.</td></tr>`}</tbody>
-      </table>
+          <table class="signbox">
+            <tr>
+              <th>Disetujui</th>
+              <th>Diperiksa</th>
+              <th>Dibuat</th>
+            </tr>
+            <tr>
+              <td class="nm">${(sign.manager||'').toUpperCase()}</td>
+              <td class="nm">${(sign.askep||'').toUpperCase()}</td>
+              <td class="nm">${(sign.asisten||'').toUpperCase()}</td>
+            </tr>
+            <tr>
+              <td class="lbl">TTD:<br>${sigts.manager_ts || '&nbsp;'}</td>
+              <td class="lbl">TTD:<br>${sigts.askep_ts   || '&nbsp;'}</td>
+              <td class="lbl">TTD:<br>${sigts.asisten_ts || '&nbsp;'}</td>
+            </tr>
+            <tr>
+              <td class="role">MANAGER</td>
+              <td class="role">ASKEP</td>
+              <td class="role">ASISTEN</td>
+            </tr>
+          </table>
+        </div>
 
-        <div class="signs">
-    <div>Asisten<br/><br/><br/>${signerLine(sign.asisten)}</div>
-    <div>Askep<br/><br/><br/>${signerLine(sign.askep)}</div>
-    <div>Manager<br/><br/><br/>${signerLine(sign.manager)}</div>
-  </div>
+        <table class="grid">
+          <!-- OPSI #1: lebar fix dengan COLGROUP (persentase total = 100%) -->
+          <colgroup>
+            <col style="width:6%;">   <!-- 1 Activity Type -->
+            <col style="width:16%;">  <!-- 2 Jenis Pekerjaan -->
+            <col style="width:9%;">   <!-- 3 Lokasi -->
+            <col style="width:6%;">   <!-- 4 Volume: Jumlah -->
+            <col style="width:4%;">   <!-- 5 Volume: Unit -->
+            <col style="width:5%;">   <!-- 6 HK/Unit -->
+            <col style="width:5%;">   <!-- 7 BHL -->
+            <col style="width:5%;">   <!-- 8 SKU -->
+            <col style="width:5%;">   <!-- 9 BHB -->
+            <col style="width:9%;">   <!-- 10 No Material -->
+            <col style="width:14%;">  <!-- 11 Nama Bahan -->
+            <col style="width:5%;">   <!-- 12 Jumlah (bahan) -->
+            <col style="width:4%;">   <!-- 13 Satuan (bahan) -->
+            <col style="width:7%;">   <!-- 14 Nama Pengawas -->
+          </colgroup>
 
-      <div class="printed">Dicetak: ${new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta', dateStyle:'medium', timeStyle:'short'}).format(new Date())}</div>
-    </section>`;
-}));
+          <thead>
+            <tr class="h1">
+              <th rowspan="2">Activity<br/>Type</th>
+              <th rowspan="2">Jenis Pekerjaan</th>
+              <th rowspan="2">Lokasi</th>
+              <th colspan="2">Volume Kerja</th>
+              <th colspan="4">HK / Borongan</th>
+              <th colspan="4">Bahan</th>
+              <th rowspan="2">Nama<br/>Pengawas</th>
+            </tr>
+            <tr class="h2">
+              <th>Jumlah</th>
+              <th>Unit</th>
+              <th>HK/UNIT</th>
+              <th>BHL</th>
+              <th>SKU</th>
+              <th>BHB</th>
+              <th>No Material</th>
+              <th>Nama</th>
+              <th>Jumlah</th>
+              <th>Satuan</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="14" class="muted">Tidak ada detail.</td></tr>`}</tbody>
+        </table>
 
+        <div class="printed">Dicetak: ${new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta', dateStyle:'medium', timeStyle:'short'}).format(new Date())}</div>
+      </section>
+    `;
+  }));
 
   const html = `
 <!doctype html><html><head><meta charset="utf-8"/>
 <title>RKB Detail ${periodeFilter||'Semua'}</title>
 <style>
-  @page{ size:A4; margin:12mm; }
-  body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+  @page{ size:A4; margin:10mm 10mm 12mm 10mm; }
+  *{ box-sizing:border-box; }
+  body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color:#000; }
   .page{ page-break-after: always; }
-  .company{ margin:0; font-size:16px; text-transform:uppercase; }
-  .estate{ margin:2px 0 8px 0; color:#444; }
-  .title{ margin:6px 0 10px 0; }
-  .meta{ display:flex; gap:18px; font-size:12px; margin-bottom:8px; }
-  table{ width:100%; border-collapse:collapse; }
-  th,td{ border:1px solid #888; padding:5px 6px; font-size:11px; vertical-align: top; }
-  th{ background:#f2f2f2; }
+
+  /* Header */
+  .hdr{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:8px; }
+  .company{ font-size:16px; font-weight:700; margin:0 0 2px 0; }
+  .estate{ font-size:12px; color:#222; margin:0 0 8px 0; }
+  .title{ font-size:16px; font-weight:700; text-align:center; margin:6px 0 10px 0; letter-spacing:.3px; }
+  .meta{ border-collapse:collapse; font-size:12px; }
+  .meta td{ padding:1px 4px; }
+
+  /* Sign box (kanan atas) */
+  .signbox{ border-collapse:collapse; width:330px; table-layout:fixed; font-size:12px; }
+  .signbox th, .signbox td{ border:1px solid #000; padding:6px 8px; vertical-align:top; }
+  .signbox th{ text-align:center; font-weight:700; background:#f4f4f4; }
+  .signbox .nm{ height:40px; font-weight:700; text-align:center; }
+  .signbox .lbl{ height:38px; text-align:center; }
+  .signbox .role{ text-align:center; font-weight:700; }
+
+  /* Grid */
+  .grid{ width:100%; border-collapse:collapse; table-layout:fixed; }
+  .grid th, .grid td{ border:1px solid #000; padding:6px 6px; font-size:11px; vertical-align:top; }
+  .grid thead .h1 th{ background:#f2f2f2; text-align:center; font-weight:700; }
+  .grid thead .h2 th{ background:#f2f2f2; text-align:center; font-weight:700; }
+  .grid thead { display: table-header-group; }
+  .grid tfoot { display: table-row-group; }  /* kalau nanti butuh footer */
+  .grid tr { page-break-inside: avoid; break-inside: avoid; }
+  .grid td.num { font-variant-numeric: tabular-nums; }
+  .grid th, .grid td { overflow-wrap: anywhere; }
+  .grid th, .grid td { padding: 5px 5px; font-size: 10.5px; }
   .t-right{ text-align:right; }
   .muted{ color:#666; }
-  .signs{ display:flex; gap:12px; justify-content:space-between; margin-top:14px; font-size:12px; text-align:center; }
-  .printed{ margin-top:8px; color:#666; font-size:10px; }
+
+  <!-- contoh tweak kecil -->
+  <col style="width:8%;">   <!-- No Material tadinya 9% -->
+  <col style="width:15%;">  <!-- Nama Bahan tadinya 14% -->
+  <!-- ambil 2% dari gabungan kolom angka, mis. HK/Unit & BHL masing2 -1% -->
+
+  /* Aturan wrapping */
+  .grid td.wrap{ white-space:pre-wrap; word-break:break-word; }
+  .grid td.num{ white-space:nowrap; }           /* angka tetap sempit */
+  .grid th, .grid td{ overflow-wrap:anywhere; } /* jaga agar teks tidak meledak */
+
+  .printed{ margin-top:6px; font-size:10px; color:#444; }
 </style></head>
 <body>
 ${sections.join('\n')}
@@ -1133,10 +1306,11 @@ async function itemsFromActuals(nomor){
     bahanAll.filter(b => String(b.nomor)===String(nomor)).forEach(b=>{
       const k = String(b.item_idx||'');
       (bahanByIdx[k] = bahanByIdx[k] || []).push({
-        nama: b.nama || '',
-        jumlah: Number(b.jumlah||0),
-        satuan: b.satuan || ''
-      });
+  nama: b.nama || '',
+  jumlah: Number(b.jumlah||0),
+  satuan: b.satuan || '',
+  no_material: getNoMaterial(b)   // <<— penting, biar ikut ke flatten
+});
     });
 
     return rowsI.map(r=>{

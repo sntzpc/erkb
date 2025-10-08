@@ -111,6 +111,7 @@ Pages.pdoForm = function () {
   .pdo-pekerjaan-input { min-width: 320px; }
   /* biar sel total bisa wrap */
   .pdo-total-cell { white-space: nowrap; }
+  .is-invalid { outline: 2px solid #dc3545 !important; }
 
   @media (max-width: 768px){
     /* di mobile: pekerjaan full-width, sel jangan sempit */
@@ -285,6 +286,22 @@ Pages.pdoForm = function () {
     return String(row.status || "").toLowerCase() === "active";
   }
 
+  // Normalisasi untuk membandingkan kode aktivitas: "TM PM-01" => "tmpm01"
+function normCode(s){
+  return String(s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Ambil nilai pertama yang ada dari daftar kandidat nama kolom
+function pickField(obj, keys){
+  for (const k of keys){
+    if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
+      return obj[k];
+    }
+  }
+  return "";
+}
+
+
   // skor spesifisitas: lebih besar = lebih spesifik
   function specificityScore(row, want) {
     const hasP = !!norm(row.plant_id);
@@ -420,15 +437,58 @@ Pages.pdoForm = function () {
     return num;
   }
 
-  function resolveActivityByName(nm) {
-    const acts = getMasterMulti("yactivity", "activity", "activities");
-    const L = String(nm || "").toLowerCase();
-    return (
-      acts.find(
-        (a) => String(a.nama || a.pekerjaan || "").toLowerCase() === L
-      ) || null
-    );
+// --- Konsolidasi key agar konsisten di semua tempat ---
+const CODE_KEYS   = ["activity_type","kode","kd","type","kode_aktivitas","activity","activity_code","no_aktivitas","kodeKegiatan"];
+const NAMA_KEYS   = ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"];
+const SATUAN_KEYS = ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"];
+const TARIF_KEYS  = ["tarif_borongan","tarif","rate_borongan","harga","nilai"];
+
+// Ambil nilai pertama yang ada dari daftar kandidat nama kolom
+function pickField(obj, keys){
+  for (const k of keys){
+    if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
+      return obj[k];
+    }
   }
+  return "";
+}
+
+// Normalisasi kode aktivitas, mis. "TM PM-01" => "tmpm01"
+function normCode(s){
+  return String(s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// ========== Perbaikan utama: resolve by NAME robust ==========
+function resolveActivityByName(nm){
+  const acts = getMasterMulti("yactivity","activity","activities");
+  const want = String(nm||"").trim().toLowerCase();
+  if(!want || !Array.isArray(acts) || !acts.length) return null;
+
+  // 1) exact match pada salah satu NAMA_KEYS
+  let hit = acts.find(a => {
+    const nama = String(pickField(a, NAMA_KEYS) || "").trim().toLowerCase();
+    return nama === want;
+  });
+
+  // 2) fallback: mengandung unik (kalau exact tidak ketemu)
+  if(!hit){
+    const cand = acts.filter(a => {
+      const nama = String(pickField(a, NAMA_KEYS) || "").trim().toLowerCase();
+      return nama.includes(want);
+    });
+    if(cand.length === 1) hit = cand[0];
+  }
+  if(!hit) return null;
+
+  // Siapkan payload standar yang dipakai di tempat lain
+  const tipe   = String(pickField(hit, CODE_KEYS)   || "").trim();
+  const nama   = String(pickField(hit, NAMA_KEYS)   || "").trim();
+  const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
+  const tarif  = Number(String(pickField(hit, TARIF_KEYS) || "").replace(/[^0-9.-]/g,"")) || 0;
+
+  return { activity_type: tipe, nama, satuan, tarif_borongan: tarif };
+}
+
 
   // ======== Model ========
   const DKEY = "pdo.form.buffer";
@@ -991,27 +1051,46 @@ function addBorongan() {
 
 // Lookup by activity_type (kode) – tolerant
 function pickActivityByType(code){
-  const v = String(code||'').trim();
-  if(!v) return null;
-  const L = v.toLowerCase();
+  const raw = String(code||"").trim();
+  if (!raw) return null;
+
+  const want = normCode(raw);
   const acts = getActivities();
 
-  // exact match on any known code field
-  let a = acts.find(x => String(x.activity_type||x.kode||x.kd||x.type||'').toLowerCase() === L);
+  // cari kandidat: cocokkan berdasarkan berbagai kemungkinan nama kolom "kode"
+  const CODE_KEYS = [
+    "activity_type", "kode", "kd", "type", "kode_aktivitas",
+    "activity", "activity_code", "no_aktivitas", "kodeKegiatan"
+  ];
 
-  // fallback contains if unique
-  if(!a){
-    const cand = acts.filter(x => String(x.activity_type||x.kode||x.kd||x.type||'').toLowerCase().includes(L));
-    if(cand.length===1) a = cand[0];
+  // 1) exact match (setelah norm) pada salah satu kolom kode
+  let hit = acts.find(a => {
+    const kode = pickField(a, CODE_KEYS);
+    return normCode(kode) === want;
+  });
+
+  // 2) fallback: contains yg unik
+  if (!hit) {
+    const cand = acts.filter(a => {
+      const kode = pickField(a, CODE_KEYS);
+      return normCode(kode).includes(want);
+    });
+    if (cand.length === 1) hit = cand[0];
   }
-  if(!a) return null;
+  if (!hit) return null;
 
-  const nama   = a.nama || a.pekerjaan || '';
-  const tipe   = a.activity_type || a.kode || a.kd || a.type || '';
-  const satuan = a.satuan_borongan || a.satuan_default || a.satuan || '';
-  const tarif  = Number(String(a.tarif_borongan??'').replace(/[^0-9.-]/g,''))||0;
+  // mapping fleksibel untuk nama/pekerjaan/satuan/tarif
+  const NAMA_KEYS   = ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"];
+  const SATUAN_KEYS = ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"];
+  const TARIF_KEYS  = ["tarif_borongan","tarif","rate_borongan","harga","nilai"];
 
-  return { nama, activity_type:tipe, satuan, tarif_borongan:tarif };
+  const nama   = String(pickField(hit, NAMA_KEYS)   || "").trim();
+  const tipe   = String(pickField(hit, CODE_KEYS)   || "").trim();
+  const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
+  const tarif  = Number(String(pickField(hit, TARIF_KEYS) || "")
+                  .replace(/[^0-9.-]/g,"")) || 0;
+
+  return { nama, activity_type: tipe, satuan, tarif_borongan: tarif };
 }
 
 
@@ -1034,14 +1113,19 @@ function pickActivityByType(code){
       ${boronganBlock()}
       <datalist id="list-activity-type">
   ${getActivities().map(a=>{
-    const type  = (a.activity_type || a.kode || a.kd || a.type || '').trim();
-    const nama  = (a.nama || a.pekerjaan || '').trim();
-    const satuan= (a.satuan_borongan || a.satuan_default || a.satuan || '').trim();
-    const tarif = Number(String(a.tarif_borongan??'').replace(/[^0-9.-]/g,''))||0;
-    const label = [type, nama?`– ${nama}`:'', satuan?`(${satuan})`:''].filter(Boolean).join(' ');
+    const type  = String(pickField(a, [
+      "activity_type","kode","kd","type","kode_aktivitas","activity","activity_code","no_aktivitas","kodeKegiatan"
+    ]) || "").trim();
+    const nama  = String(pickField(a, ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"]) || "").trim();
+    const satuan= String(pickField(a, ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"]) || "").trim();
+    const tarif = Number(String(pickField(a, ["tarif_borongan","tarif","rate_borongan","harga","nilai"]) || "")
+                    .replace(/[^0-9.-]/g,"")) || 0;
+
+    const label = [type, nama?`– ${nama}`:"", satuan?`(${satuan})`:""].filter(Boolean).join(" ");
     return `<option value="${type}" data-nama="${nama}" data-satuan="${satuan}" data-tarif="${tarif}">${label}</option>`;
-  }).join('')}
+  }).join("")}
 </datalist>
+
 ${footerActions()}
     `;
 
@@ -1146,9 +1230,12 @@ ${footerActions()}
       );
 
       const btnSave = U.qs("#btn-save-draft");
-      if (btnSave) {
-        btnSave.onclick = onSaveDraft;
-      }
+if (btnSave) {
+  btnSave.addEventListener('click', (e)=>{
+    e.preventDefault(); // jaga-jaga kalau nanti dibungkus <form>
+    onSaveDraft();
+  });
+}
     }
     if (!READONLY) {
       attachMaskText("inp-target", "id2", (v) => {
@@ -1184,7 +1271,187 @@ ${footerActions()}
     updateHeaderTotalsUI();
   }
 
+  // ======== VALIDATION ========
+function clearValidationMarks(){
+  root.querySelectorAll('.is-invalid').forEach(el=>{
+    el.classList.remove('is-invalid');
+    el.removeAttribute('title');
+  });
+}
+
+function markInvalid(el, msg){
+  if(!el) return;
+  el.classList.add('is-invalid');
+  if(msg) el.setAttribute('title', msg);
+}
+
+function findCellInput(sec, k, i){
+  return root.querySelector(`tr[data-row-type="${sec}"] [data-sec="${sec}"][data-k="${k}"][data-i="${i}"]`);
+}
+
+// Wajib terisi (string non-kosong)
+function reqStr(val){ return String(val ?? '').trim() !== ''; }
+// Wajib > 0 (angka)
+function reqPos(val){ return Number(val || 0) > 0; }
+
+function validateBeforeSave(){
+  // Sinkronkan nilai dari UI (kalau user baru mengetik lalu langsung klik)
+const elTargetNow = root.querySelector('#inp-target');
+if (elTargetNow) F.target_produksi_ton = parseLocal(elTargetNow.value);
+
+  clearValidationMarks();
+  const errors = [];
+  let firstEl = null;
+
+  // ===== Header checks =====
+  // NB: periode & nomor disabled namun kita tetap pastikan nilainya ada
+  if(!reqStr(F.periode)){ errors.push('Periode wajib diisi.'); }
+  if(!reqStr(F.nomor)){ errors.push('Nomor PDO wajib ada.'); }
+  if(!reqStr(F.ref_rkb)){ errors.push('Ref. RKB wajib diisi.'); }
+
+  if(!reqStr(F.divisi_id)){ errors.push('Divisi wajib diisi.'); }
+  if(!reqStr(F.estate_id)){ errors.push('Estate wajib diisi.'); }
+  if(!reqStr(F.rayon_id)){ errors.push('Rayon wajib diisi.'); }
+
+  // Angka header: semua wajib > 0 sesuai permintaan
+// Angka header: semua wajib > 0 sesuai permintaan
+const elTarget = root.querySelector('#inp-target');
+
+// KOERSI: pastikan model numeric dulu (atasi kasus "0,00" dsb.)
+F.target_produksi_ton = parseLocal(F.target_produksi_ton);
+
+if (!reqPos(F.target_produksi_ton)) {
+  errors.push('Target Produksi (Ton) harus > 0.');
+  if (!firstEl) firstEl = elTarget;
+  markInvalid(elTarget, 'Wajib lebih dari nol');
+}
+  const elPremiP = root.querySelector('#inp-premi-panen');
+  if(!reqPos(F.premi_panen)){
+    errors.push('Premi Panen harus > 0.');
+    if(!firstEl) firstEl = elPremiP;
+    markInvalid(elPremiP, 'Wajib lebih dari nol');
+  }
+  const elPremiN = root.querySelector('#inp-premi-non');
+  if(!reqPos(F.premi_non_panen)){
+    errors.push('Premi Non Panen harus > 0.');
+    if(!firstEl) firstEl = elPremiN;
+    markInvalid(elPremiN, 'Wajib lebih dari nol');
+  }
+
+  // Upah HK (disabled tapi tetap wajib ada dan >0)
+  if(!reqPos(F.upah_hk_sku)){
+    errors.push('Upah HK SKU belum tersedia (> 0) — tarik master yrates.');
+  }
+  if(!reqPos(F.upah_hk_bhl)){
+    errors.push('Upah HK BHL belum tersedia (> 0) — tarik master yrates.');
+  }
+
+  // Minimal harus ada isi baris HK atau Borongan
+  const hasAnyRow = Array.isArray(F.hk) && F.hk.length || Array.isArray(F.borongan) && F.borongan.length;
+  if(!hasAnyRow){
+    errors.push('Tambahkan minimal satu baris HK atau Borongan.');
+  }
+
+  // ===== Detail HK =====
+  (F.hk || []).forEach((it, i)=>{
+    const elType = findCellInput('hk','activity_type',i);
+    const elJob  = findCellInput('hk','pekerjaan',i); // disabled; hanya penanda error
+    const elSat  = findCellInput('hk','satuan',i);
+    const elLuas = findCellInput('hk','luas_ha',i);
+    const elHK   = findCellInput('hk','hk',i);
+    const elTipe = root.querySelector(`tr[data-row-type="hk"] select[data-sec="hk"][data-k="tipe"][data-i="${i}"]`);
+
+    if(!reqStr(it.activity_type)){
+      errors.push(`HK baris ${i+1}: Activity Type wajib diisi.`);
+      if(!firstEl) firstEl = elType;
+      markInvalid(elType, 'Wajib diisi');
+    }
+    if(!reqStr(it.pekerjaan)){
+      errors.push(`HK baris ${i+1}: Jenis Pekerjaan tidak terbaca dari master.`);
+      if(!firstEl) firstEl = elType || elJob;
+      markInvalid(elJob || elType, 'Isi/benarkan Activity Type (nama otomatis)');
+    }
+    if(!reqStr(it.satuan)){
+      errors.push(`HK baris ${i+1}: Satuan wajib diisi.`);
+      if(!firstEl) firstEl = elSat;
+      markInvalid(elSat, 'Wajib diisi');
+    }
+    if(!reqPos(it.luas_ha)){
+      errors.push(`HK baris ${i+1}: Luas harus > 0.`);
+      if(!firstEl) firstEl = elLuas;
+      markInvalid(elLuas, 'Wajib > 0');
+    }
+    if(!reqPos(it.hk)){
+      errors.push(`HK baris ${i+1}: HK harus > 0.`);
+      if(!firstEl) firstEl = elHK;
+      markInvalid(elHK, 'Wajib > 0');
+    }
+    if(!reqStr(it.tipe)){
+      errors.push(`HK baris ${i+1}: Tipe HK wajib (SKU/BHL).`);
+      if(!firstEl) firstEl = elTipe;
+      markInvalid(elTipe, 'Pilih tipe');
+    }
+    if(!reqPos(it.total_rp)){
+      // total dihitung otomatis; kalau 0 kemungkinan upah 0 atau hk 0
+      errors.push(`HK baris ${i+1}: Total (Rp) masih 0 — cek Upah/HK.`);
+      // tak perlu mark: sudah ditandai di komponen penyebab
+    }
+  });
+
+  // ===== Detail BORONGAN =====
+  (F.borongan || []).forEach((it, i)=>{
+    const elType = findCellInput('bor','activity_type',i);
+    const elJob  = findCellInput('bor','pekerjaan',i); // disabled; hanya penanda error
+    const elSat  = findCellInput('bor','satuan',i);
+    const elQty  = findCellInput('bor','qty',i);
+    const elTar  = findCellInput('bor','tarif_borongan',i);
+
+    if(!reqStr(it.activity_type)){
+      errors.push(`Borongan baris ${i+1}: Activity Type wajib diisi.`);
+      if(!firstEl) firstEl = elType;
+      markInvalid(elType, 'Wajib diisi');
+    }
+    if(!reqStr(it.pekerjaan)){
+      errors.push(`Borongan baris ${i+1}: Jenis Pekerjaan tidak terbaca dari master.`);
+      if(!firstEl) firstEl = elType || elJob;
+      markInvalid(elJob || elType, 'Isi/benarkan Activity Type (nama otomatis)');
+    }
+    if(!reqStr(it.satuan)){
+      errors.push(`Borongan baris ${i+1}: Satuan wajib diisi.`);
+      if(!firstEl) firstEl = elSat;
+      markInvalid(elSat, 'Wajib diisi');
+    }
+    if(!reqPos(it.qty)){
+      errors.push(`Borongan baris ${i+1}: Qty harus > 0.`);
+      if(!firstEl) firstEl = elQty;
+      markInvalid(elQty, 'Wajib > 0');
+    }
+    if(!reqPos(it.tarif_borongan)){
+      errors.push(`Borongan baris ${i+1}: Tarif Borongan harus > 0.`);
+      if(!firstEl) firstEl = elTar;
+      markInvalid(elTar, 'Wajib > 0');
+    }
+    if(!reqPos(it.total_rp)){
+      errors.push(`Borongan baris ${i+1}: Total (Rp) masih 0 — cek Qty/Tarif.`);
+    }
+  });
+
+  if (errors.length){
+  U.alert(`Periksa kembali isian Anda:\n\n• ${errors.join('\n• ')}`);
+  U.toast('Validasi gagal. Periksa bidang yang ditandai.', 'danger');
+  if (firstEl){
+    try{ firstEl.scrollIntoView({behavior:'smooth', block:'center'}); }catch(_){}
+    try{ firstEl.focus(); }catch(_){}
+  }
+  return false;
+}
+  return true;
+}
+
+
   async function onSaveDraft() {
+    if (!validateBeforeSave()) return;
+
     const arr = U.S.get("kpl.actual.pdo_draft", []);
     const idx = arr.findIndex((x) => String(x.nomor) === String(F.nomor));
     if (idx >= 0) arr[idx] = F;
