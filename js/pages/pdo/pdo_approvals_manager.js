@@ -155,7 +155,7 @@ Pages.pdoApprovalsManager = function () {
       // update cache → status balik ke draft (mengikuti backend pdoManagerComment)
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DRAFT'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       const tr = root.querySelector(`button[data-n="${nomor}"]`)?.closest('tr');
       if (tr) tr.remove();
       U.toast('Komentar terkirim.','success');
@@ -163,7 +163,7 @@ Pages.pdoApprovalsManager = function () {
       queueAction('pdoManagerComment', { nomor, text }); // offline queue
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DRAFT'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       const tr = root.querySelector(`button[data-n="${nomor}"]`)?.closest('tr');
       if (tr) tr.remove();
       U.toast('Offline: komentar diantrikan ke Outbox.','warning');
@@ -181,7 +181,7 @@ Pages.pdoApprovalsManager = function () {
 
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DONE'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='full_approved'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
 
       if (tr) tr.remove();
       U.toast('Approved.','success');
@@ -189,7 +189,7 @@ Pages.pdoApprovalsManager = function () {
       queueAction('pdoManagerApprove', { nomor }); // offline queue
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DONE'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='full_approved'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       if (tr) tr.remove();
       U.toast('Offline: approval diantrikan ke Outbox.','warning');
     }finally{

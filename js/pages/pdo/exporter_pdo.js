@@ -25,7 +25,7 @@ window.Exporter = window.Exporter || {};
     rows.push(["PERMINTAAN DANA OPERASIONAL"]);
     rows.push([]);
     rows.push(["Periode", ":", F.periode||'']);
-    rows.push(["Divisi", ":", F.divisi_kode||'']);
+    rows.push(["Divisi", ":", F.divisi_id||'']);
     rows.push(["No. PDO", ":", F.nomor||'']);
     rows.push(["Ref. RKB", ":", F.ref_rkb||'']);
     rows.push(["Upah Per HK", ":", `BHL: ${F.upah_hk_bhl||0} | SKU: ${F.upah_hk_sku||0}`]);
@@ -60,7 +60,7 @@ window.Exporter = window.Exporter || {};
     doc.text("PERMINTAAN DANA OPERASIONAL", 14, 16);
     doc.setFontSize(10);
     doc.text(`Periode: ${F.periode||''}`, 14, 24);
-    doc.text(`Divisi: ${F.divisi_kode||''}`, 14, 30);
+    doc.text(`Divisi: ${F.divisi_id||''}`, 14, 30);
     doc.text(`No. PDO: ${F.nomor||''}`, 14, 36);
     doc.text(`Ref. RKB: ${F.ref_rkb||''}`, 14, 42);
 
@@ -90,7 +90,7 @@ window.Exporter = window.Exporter || {};
   Exporter.exportRekapPDOXlsx = function(rows){
     if(typeof XLSX==='undefined'){ alert('SheetJS XLSX belum dimuat'); return; }
     const head = ["Periode","No. PDO","Divisi","Rayon","Estate","Total PDO (Rp)"];
-    const data = rows.map(r=>[r.periode||'', r.nomor||'', r.divisi_kode||'', r.rayon_kode||'', r.estate_nama||'', Number(r.total_rp||0)]);
+    const data = rows.map(r=>[r.periode||'', r.nomor||'', r.divisi_id||'', r.rayon_kode||'', r.estate_nama||'', Number(r.total_rp||0)]);
     const ws = XLSX.utils.aoa_to_sheet([head, ...data]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Rekap PDO');
@@ -104,7 +104,7 @@ window.Exporter = window.Exporter || {};
     doc.setFontSize(9);
     let y=24;
     rows.forEach(r=>{
-      const line = `${r.periode||''} | ${r.nomor||''} | ${r.divisi_kode||''} | ${r.rayon_kode||''} | ${r.estate_nama||''} | ${Number(r.total_rp||0).toLocaleString('id-ID')}`;
+      const line = `${r.periode||''} | ${r.nomor||''} | ${r.divisi_id||''} | ${r.rayon_kode||''} | ${r.estate_nama||''} | ${Number(r.total_rp||0).toLocaleString('id-ID')}`;
       doc.text(line, 14, y); y+=6; if(y>270){ doc.addPage(); y=20; }
     });
     doc.save('Rekap_PDO.pdf');

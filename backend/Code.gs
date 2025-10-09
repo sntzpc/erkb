@@ -37,10 +37,17 @@ function doPost(e){
       listForManager, managerApprove, managerComment,
       ktuRekap, rkbBackfillScope, getRkbDetail,
       inboxList, inboxMarkRead, inboxUnreadCount,
+      
       // Admin Master CRUD
       listMaster, replaceMaster, upsertMaster, deleteMaster,
+      
       // PDO
-      pushPDO,pdoListForAskep, pdoAskepApprove,pdoListForManager, pdoManagerApprove, ktuRekapPDO
+      pushPDO, pushPDOv2, pdoListForAskep, pdoAskepApprove, pdoAskepComment,
+      pdoListForManager, pdoManagerApprove, pdoManagerComment, ktuRekapPDO,
+      getPdoDetail,
+
+      // RKH
+      createRKHFromRKB, pushRKH, getRkhDetail
     };
     if(!map[action]) return json({ok:false, error:'Unknown action'});
     return json(map[action](body, user));
@@ -97,6 +104,13 @@ function mastersAsMap(){
   };
   return m;
 }
+
+// WIB timestamp "DD/MM/YY-hh:mm:ss" → untuk tanda tangan digital
+function sigWIB(){
+  const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
+  return Utilities.formatDate(new Date(), tz, 'dd/MM/yy-HH:mm:ss');
+}
+
 function nowIso(){ return new Date().toISOString(); }
 function addDays(d, n){ return new Date(d.getTime()+ (n*24*60*60*1000)); }
 function prop(key){ return PropertiesService.getScriptProperties().getProperty(key); }
@@ -127,11 +141,14 @@ function ensureRKB(){
       'nomor','periode',
       'plant_id','estate_id','rayon_id','divisi_id',
       'divisi','estate_full',
-      // kolom single-item dibiarkan untuk legacy, tapi tidak dipakai pada multi
       'pekerjaan','activity_type',
       'volume','satuan','hk_unit','pct_bhl','pct_sku','pct_bhb',
       'hk_bhl','hk_sku','hk_bhb','pengawas',
-      'status','username','created_at','updated_at'
+      'hk_total',
+      'status','username',
+      // --- digital signatures (baru) ---
+      'asisten_ts','askep_ts','manager_ts',
+      'created_at','updated_at'
     ]);
     return s;
   }
@@ -173,11 +190,23 @@ function ensureRKBItems(){
 }
 function ensureRKBBahan(){
   const s = sh(SHEETS.RKB_BAHAN);
-  if(s.getLastRow()<1) headers(s,[
-    'nomor','item_idx','nama','jumlah','satuan','created_at'
-  ]);
+  if (s.getLastRow() < 1) {
+    headers(s,[
+      'nomor','item_idx','no_material','nama','jumlah','satuan','created_at'
+    ]);
+    return s;
+  }
+  // MIGRASI: tambah kolom no_material jika belum ada
+  const lastCol = s.getLastColumn();
+  const head = s.getRange(1,1,1,lastCol).getValues()[0];
+  if (!head.includes('no_material')) {
+    s.insertColumnsAfter(lastCol || 1, 1);
+    const newHead = head.concat(['no_material']);
+    s.getRange(1,1,1,newHead.length).setValues([newHead]).setFontWeight('bold');
+  }
   return s;
 }
+
 function ensureMasters(){
   // Cukup pastikan sheet ada. Header dibiarkan mengikuti file master kamu.
   MASTER_SHEETS.forEach(n=> sh(n));
@@ -231,7 +260,16 @@ function issueSession(userRow){
   const obj = {token:t, username:userRow.username, expiresAt:exp.toISOString()};
   const vals = head.map(h=> obj[h]!==undefined?obj[h]:'');
   sess.appendRow(vals);
-  const profile = {username:userRow.username, role:userRow.role, divisi:userRow.divisi, estate_full:userRow.estate_full};
+  const profile = {
+    username: userRow.username,
+    role: userRow.role,
+    plant_id: userRow.plant_id || '',
+    estate_id: userRow.estate_id || '',
+    rayon_id: userRow.rayon_id || '',
+    divisi_id: userRow.divisi_id || '',
+    divisi: userRow.divisi || '',          // jika ada kolom ini
+    estate_full: userRow.estate_full || ''
+  };
   return {ok:true, token:t, expiresAt:exp.toISOString(), profile};
 }
 function validateSession(token, action){
@@ -341,7 +379,20 @@ function pullMaster(body, sess){
 
     masters.yactivity = mastersAll.yactivity;
     masters.ybahan    = mastersAll.ybahan;
-    masters.yrates    = only(mastersAll.yrates, r=> String(r.divisi_id||'') === divId);
+    masters.yrates = only(mastersAll.yrates, r => {
+  const div = String(r.divisi_id||'');
+  const est = String(r.estate_id||'');
+  const pl  = String(r.plant_id ||'');
+  // global: semua kosong
+  if(!div && !est && !pl) return true;
+  // spesifik divisi
+  if(div) return div === divId;
+  // spesifik estate (tanpa divisi)
+  if(est) return est === estateId;
+  // spesifik plant (tanpa estate & divisi)
+  if(pl)  return pl  === String(me.plant_id||'');
+  return false;
+});
     masters.yorg_map  = only(mastersAll.yorg_map, u =>
       String(u.divisi_id||'') === divId || String(u.rayon_id||'') === rayonId || String(u.estate_id||'') === estateId
     );
@@ -364,11 +415,25 @@ function pullMaster(body, sess){
 
     masters.yactivity = mastersAll.yactivity;
     masters.ybahan    = mastersAll.ybahan;
-    masters.yrates    = only(mastersAll.yrates, r=> divIds.has(r.divisi_id));
+    masters.yrates = only(mastersAll.yrates, r => {
+  const div = String(r.divisi_id||'');
+  const est = String(r.estate_id||'');
+  const pl  = String(r.plant_id ||'');
+  // global
+  if(!div && !est && !pl) return true;
+  // bila baris punya divisi: harus termasuk divIds estate ini
+  if(div) return divIds.has(div);
+  // bila hanya estate: harus match estate saya
+  if(est) return est === estateId;
+  // bila hanya plant: match plant saya (ambil dari estate jika perlu)
+  const plantOfEstate = ((masters.yestate||[])[0]||{}).plant_id || me.plant_id || '';
+  if(pl)  return pl === String(plantOfEstate||'');
+  return false;
+});
     masters.yorg_map  = only(mastersAll.yorg_map, u=> String(u.estate_id||'') === estateId);
   }
 
-  // === 2) Data aktual (RKB) sesuai role, seperti sebelumnya ===
+  // === 2a) Data aktual (RKB) sesuai role, seperti sebelumnya ===
   const allRkb = getAll(sh(SHEETS.RKB));
   let rkb;
   if (String(me.role||'') === 'Admin') {
@@ -381,6 +446,46 @@ function pullMaster(body, sess){
 
   // Set nomor untuk filter detail
   const nomorSet = new Set((rkb||[]).map(r => String(r.nomor)));
+
+  // === 2b) Data aktual (PDO) sesuai role ===
+const allPdo = getAll(sh(PDO_SHEETS.PDO));
+let pdo;
+if (String(me.role||'') === 'Admin') {
+  pdo = allPdo.slice(-1000);
+} else if (String(me.role||'') === 'Asisten') {
+  pdo = allPdo.filter(x => String(x.divisi_id||'') === String(me.divisi_id||'')).slice(-500);
+} else {
+  pdo = allPdo.filter(x => String(x.estate_id||'') === String(me.estate_id||'')).slice(-1000);
+}
+const pdoNomorSet = new Set((pdo||[]).map(r => String(r.nomor)));
+const pdo_items = getAll(sh(PDO_SHEETS.PDO_ITEMS)).filter(i => pdoNomorSet.has(String(i.nomor)));
+const pdo_comments_all = getAll(sh(PDO_SHEETS.PDO_COMMENTS));
+let pdo_comments = pdo_comments_all.filter(c =>
+  String(c.to_username||'').toLowerCase() === String(me.username||'').toLowerCase()
+);
+// opsional join info periode/divisi untuk badge
+const mapP = Object.fromEntries(pdo.map(pp => [String(pp.nomor), pp]));
+pdo_comments.forEach(x=>{
+  const rr = mapP[String(x.nomor)] || {};
+  x.periode = rr.periode || '';
+  x.divisi  = rr.divisi_id || '';
+});
+
+// === 2c) Data aktual (RKH) sesuai role ===
+ensureRKH(); ensureRKHItems(); ensureRKHBahan();
+const allRkh = getAll(sh(RKH_SHEETS.RKH));
+let rkh;
+if (String(me.role||'') === 'Admin') {
+  rkh = allRkh.slice(-1000);
+} else if (String(me.role||'') === 'Asisten') {
+  rkh = allRkh.filter(x => String(x.divisi_id||'') === String(me.divisi_id||'')).slice(-500);
+} else {
+  rkh = allRkh.filter(x => String(x.estate_id||'') === String(me.estate_id||'')).slice(-1000);
+}
+const rkhNomorSet = new Set((rkh||[]).map(r => String(r.nomor)));
+const rkh_items = getAll(sh(RKH_SHEETS.RKH_ITEMS)).filter(i => rkhNomorSet.has(String(i.nomor)));
+const rkh_bahan = getAll(sh(RKH_SHEETS.RKH_BAHAN)).filter(b => rkhNomorSet.has(String(b.nomor)));
+
 
   // === 3) Detail RKB: items & bahan (hanya untuk nomor yang lolos filter) ===
   const allItems = getAll(sh(SHEETS.RKB_ITEMS));
@@ -411,15 +516,28 @@ function pullMaster(body, sess){
     ok: true,
     masters,
     actuals: {
-      rkb,
-      rkb_items,
-      rkb_bahan,
-      rkb_comments
+    // === RKB ===
+      rkb,  rkb_items,  rkb_bahan,  rkb_comments,
+
+    // === PDO ===
+    pdo, pdo_items, pdo_comments,
+
+    // RKH
+    rkh, rkh_items, rkh_bahan
     },
     counters: {
       inboxUnread
     }
   };
+}
+
+function getNoMaterial_(b){
+  const keys = ['no_material','noMaterial','material_no','materialNo','kode','code','no','id'];
+  for (var i=0;i<keys.length;i++){
+    var v = b && b[keys[i]];
+    if (v !== undefined && v !== null && String(v).trim() !== '') return String(v);
+  }
+  return '';
 }
 
 /** Push RKB from Asisten **/
@@ -437,23 +555,27 @@ function pushRKB(body, user){
   const s = sh(SHEETS.RKB);
 
   // === Ringkasan 1 baris per RKB (belum di-upsert; hk_total dihitung dulu) ===
-  const summary = {
-    nomor: row.nomor, periode: row.periode,
-    plant_id: me.plant_id||'',
-    estate_id: me.estate_id||'',
-    rayon_id: me.rayon_id||'',
-    divisi_id: me.divisi_id||'',
-    divisi: row.divisi||me.divisi_id||'',
-    estate_full: estateFullFinal||'',
-    // kosongkan kolom single-item legacy
-    pekerjaan: '', activity_type: '',
-    volume: '', satuan: '', hk_unit: '', pct_bhl:'', pct_sku:'', pct_bhb:'',
-    hk_bhl:'', hk_sku:'', hk_bhb:'', pengawas:'',
-    status: 'submitted',
-    username: me.username||'',
-    created_at: nowIso(),
-    updated_at: nowIso()
-  };
+const summary = {
+  nomor: row.nomor, periode: row.periode,
+  plant_id: me.plant_id||'',
+  estate_id: me.estate_id||'',
+  rayon_id: me.rayon_id||'',
+  divisi_id: me.divisi_id||'',
+  divisi: row.divisi||me.divisi_id||'',
+  estate_full: estateFullFinal||'',
+  pekerjaan:'', activity_type:'', volume:'', satuan:'', hk_unit:'', pct_bhl:'', pct_sku:'', pct_bhb:'',
+  hk_bhl:'', hk_sku:'', hk_bhb:'', pengawas:'',
+  hk_total: 0,                               // dihitung setelah loop items
+  status: 'submitted',
+  username: me.username||'',
+  // --- digital signatures ---
+  asisten_ts: row.created_ts || sigWIB(),    // TTD Asisten saat submit
+  askep_ts: '',                              // diisi saat Askep approve
+  manager_ts: '',                            // diisi saat Manager approve
+  created_at: nowIso(),
+  updated_at: nowIso()
+};
+
 
   // === Hapus detail lama, siapkan sheet detail ===
   clearDetailsByNomor(row.nomor);
@@ -476,7 +598,7 @@ function pushRKB(body, user){
     const hk_bhb = base * ((Number(it.pct_bhb)||0)/100);
     const hk_total = hk_bhl + hk_sku + hk_bhb;
 
-    const lokasiStr = (it.lokasi||[]).map(l=>l.name).join(', ');
+    const lokasiStr = lokasiToString_(it.lokasi);
 
     const objI = {
       nomor: row.nomor,
@@ -500,6 +622,7 @@ function pushRKB(body, user){
       const objB = {
         nomor: row.nomor,
         item_idx: idx+1,
+        no_material: getNoMaterial_(b),   // ← isi kolom no_material
         nama: b.nama||'',
         jumlah: b.jumlah||'',
         satuan: b.satuan||'',
@@ -620,7 +743,7 @@ function askepApprove(body, sess){
   const r = all.find(x=> String(x.nomor)===String(nomor)); if(!r) return {ok:false, error:'RKB tidak ditemukan'};
   if(String(r.rayon_id||'') !== String(me.rayon_id||'')) return {ok:false, error:'Unauthorized (rayon mismatch)'};
 
-  r.status='askep_approved'; r.updated_at=nowIso(); upsertRow(s, 'nomor', r);
+  r.status = 'askep_approved';  r.askep_ts = sigWIB();   r.updated_at = nowIso();  upsertRow(s, 'nomor', r);
 
   const m = mastersAsMap();
   const asis = m._idx.userByName[(r.username||'').toLowerCase()];
@@ -693,7 +816,7 @@ function managerApprove(body, sess){
   const r = all.find(x=> String(x.nomor)===String(nomor)); if(!r) return {ok:false, error:'RKB tidak ditemukan'};
   if(String(r.estate_id||'') !== String(me.estate_id||'')) return {ok:false, error:'Unauthorized (estate mismatch)'};
 
-  r.status='full_approved'; r.updated_at=nowIso(); upsertRow(s, 'nomor', r);
+  r.status = 'full_approved'; r.manager_ts = sigWIB(); r.updated_at = nowIso(); upsertRow(s, 'nomor', r);
 
   const m = mastersAsMap();
   const asis = m._idx.userByName[(r.username||'').toLowerCase()];
@@ -704,9 +827,7 @@ function managerApprove(body, sess){
     .concat(m._idx.userByName[(me.username||'').toLowerCase()]?.telegram_manager||[])
     .concat(ktu.map(k=>k.telegram_ktu).filter(Boolean));
 
-  const msg = `🎉 Manager FULL APPROVE
-No: ${nomor}
-Status: Full Approve`;
+  const msg = `🎉 Manager FULL APPROVE No: ${nomor} Status: Full Approve`;
   ids.forEach(id=> sendTelegram(id, msg));
   return {ok:true};
 }
@@ -850,10 +971,15 @@ function ensureAllSheets(){
   ensureMasters();     // yplant, yestate, dst (hanya membuat tab; header mengikuti file master)
   ensureSessions();    // sessions
   ensureUsers();       // users (opsional, utk utilitas admin)
-  ensureRKB();         // rkb (ringkasan RKB per nomor)
-  ensureComments();    // rkb_comments
-  ensureRKBItems();    // rkb_items (detail pekerjaan)
-  ensureRKBBahan();    // rkb_bahan (detail bahan)
+  
+  // RKB
+  ensureRKB(); ensureComments(); ensureRKBItems(); ensureRKBBahan();  
+  
+  // PDO
+  ensurePDO(); ensurePDOItems(); ensurePDOComments();
+
+  // RKH
+  ensureRKH();  ensureRKHItems();  ensureRKHBahan();
 }
 
 // ====== [HELPER] Resolve scope (estate_id/rayon_id/divisi_id + estate_full) dari baris RKB atau username ======
@@ -931,35 +1057,36 @@ function rkbBackfillScope(body, sess) {
   const items = getAll(si);
   const hkMap = {};
   items.forEach(it => {
-    const n = it.nomor;
-    const hk = Number(it.hk_total||0);
-    hkMap[n] = (hkMap[n]||0) + hk;
+    const n = String(it.nomor);
+    const hk = Number(it.hk_total || 0);
+    hkMap[n] = (hkMap[n] || 0) + hk;
   });
 
   let updated = 0;
   const head = s.getRange(1,1,1,s.getLastColumn()).getValues()[0];
 
+  // backfill hanya kolom scope & hk_total
   const newRows = all.map(r => {
-    // scope (termasuk plant_id)
-    const needScope = !r.plant_id || !r.estate_id || !r.rayon_id || !r.divisi_id || !r.estate_full;
+    const needScope =
+      !r.plant_id || !r.estate_id || !r.rayon_id || !r.divisi_id || !r.estate_full;
     const scope = needScope ? resolveScopeFromRow_(r) : {};
-    // hk_total
-    const currentHk = Number(r.hk_total||0);
-    const hk_total = currentHk>0 ? currentHk : Number(hkMap[r.nomor]||0);
 
-    if (!needScope && currentHk>0) return r; // tidak ada perubahan
+    const currentHk = Number(r.hk_total || 0);
+    const hk_total = currentHk > 0 ? currentHk : Number(hkMap[String(r.nomor)] || 0);
 
-    const merged = Object.assign({}, r, scope, { hk_total });
+    if (!needScope && currentHk > 0) return r; // tidak ada perubahan
+
     updated += 1;
-    return merged;
+    return Object.assign({}, r, scope, { hk_total });
   });
 
-  if (updated>0) {
-    const vals = newRows.map(row => head.map(h => row[h]!==undefined ? row[h] : ''));
+  if (updated > 0) {
+    const vals = newRows.map(row => head.map(h => row[h] !== undefined ? row[h] : ''));
     s.getRange(2,1,vals.length, head.length).setValues(vals);
   }
   return {ok:true, updated, scanned: all.length};
 }
+
 
 
 // ===== Upgrade header sheet RKB agar kolom scope wajib selalu ada =====
@@ -972,8 +1099,11 @@ function ensureRkbColumns_() {
   const REQUIRED = [
     'plant_id','estate_id','rayon_id','divisi_id',
     'divisi','estate_full',
-    'hk_total',                      // ← wajib ada di ringkasan RKB
-    'status','username','created_at','updated_at'
+    'hk_total',
+    'status','username',
+    // --- digital signatures (baru) ---
+    'asisten_ts','askep_ts','manager_ts',
+    'created_at','updated_at'
   ];
 
   const have = new Set((head||[]).filter(Boolean));
@@ -984,6 +1114,7 @@ function ensureRkbColumns_() {
   const newHead = head.concat(missing);
   s.getRange(1,1,1,newHead.length).setValues([newHead]).setFontWeight('bold');
 }
+
 
 // Hitung hk_total item dengan fallback untuk data lama
 function calcHkTotal_(it){
@@ -1097,16 +1228,28 @@ function inboxUnreadCount(body, sess){
   return {ok:true, count: rows.length};
 }
 
-
 // === [BEGIN PDO MODULE] =====================================================
 const PDO_SHEETS = {
   PDO: 'pdo',
-  PDO_ITEMS: 'pdo_items'
+  PDO_ITEMS: 'pdo_items',
+  PDO_COMMENTS: 'pdo_comments'
 };
+
+// WIB timestamp "DD/MM/YY-hh:mm:ss" → untuk tanda tangan digital
+function nowSigWIB(){
+  const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
+  return Utilities.formatDate(new Date(), tz, 'dd/MM/yy-HH:mm:ss');
+}
+
+// WIB timestamp "DDMMYYYY.hhmmss" → tetap disediakan bila diperlukan (nomor dll)
+function nowStampWIB(){
+  const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
+  return Utilities.formatDate(new Date(), tz, 'ddMMyyyy.HHmmss');
+}
 
 function ensurePDO(){
   const s = sh(PDO_SHEETS.PDO);
-  if(s.getLastRow()<1){
+  if (s.getLastRow() < 1){
     headers(s, [
       'nomor','periode','estate_id','rayon_id','divisi_id',
       'ref_rkb','upah_hk_bhl','upah_hk_sku','target_produksi_ton',
@@ -1115,35 +1258,110 @@ function ensurePDO(){
       'created_by','created_at','updated_at'
     ]);
   }
+  // format kolom estate_id (C) & rayon_id (D) sebagai text
+  const maxRows = Math.max(s.getMaxRows(), 1000);
+  s.getRange(1, 3, maxRows, 2).setNumberFormat('@');
   return s;
 }
+
+
 function ensurePDOItems(){
   const s = sh(PDO_SHEETS.PDO_ITEMS);
-  if(s.getLastRow()<1){
+  if (s.getLastRow() < 1){
     headers(s, [
-      'nomor','idx','activity_type','pekerjaan','satuan_borongan','tarif_borongan',
-      'luas_ha','jlh_hk','total_rp'
+      'nomor','tipe_item','activity_type','idx','pekerjaan','satuan',
+      'luas_ha','hk','tipe_hk','total_rp','qty','tarif_borongan'
     ]);
   }
   return s;
 }
 
+function ensurePDOComments(){
+  const s = sh(PDO_SHEETS.PDO_COMMENTS);
+  if (s.getLastRow() < 1){
+    headers(s, ['id','nomor','role','username','to_username','comment','created_at','read_at']);
+  } else {
+    // jaga-jaga kalau sheet lama belum punya kolom opsional
+    const lastCol = s.getLastColumn();
+    const head = s.getRange(1,1,1,lastCol).getValues()[0];
+    const NEED = ['id','to_username','read_at'];
+    const missing = NEED.filter(h=> !head.includes(h));
+    if(missing.length){
+      s.insertColumnsAfter(lastCol || 1, missing.length);
+      const newHead = head.concat(missing);
+      s.getRange(1,1,1,newHead.length).setValues([newHead]).setFontWeight('bold');
+    }
+  }
+  return s;
+}
+
+
+/**
+ * Backward-compatible (KLASIK): payload body.items = array "gabungan"
+ * Tetap dipertahankan agar klien lama masih bisa push.
+ */
 function pushPDO(body, sess){
+  // Konversi ke struktur baru lalu delegasikan ke pushPDOv2
+  const row = body.row || {};
+  const itemsLegacy = body.items || []; // [{activity_type, pekerjaan, satuan_borongan, tarif_borongan, luas_ha, jlh_hk, total_rp}]
+
+  const hk = [];
+  const bor = [];
+
+  (itemsLegacy || []).forEach((it, i) => {
+    const activity_type = it.activity_type || '';  // ← ambil di sini
+    const pekerjaan = it.pekerjaan || '';
+    const satuan = it.satuan_borongan || '';
+    const luas_ha = Number(it.luas_ha || 0);
+    const hkVal = Number(it.jlh_hk || 0);
+    const tb = Number(it.tarif_borongan || 0);
+    const tot = Number(it.total_rp || 0);
+
+    // Heuristik: jika punya HK → masukkan HK (tipe tidak diketahui → kosong)
+    if (hkVal > 0){
+      hk.push({ activity_type, pekerjaan, satuan, luas_ha, hk: hkVal, tipe:'', total_rp: (tot>0 ? tot : Math.round(hkVal * 0)) });
+    }
+
+    // Jika ada tarif borongan & total → masukkan Borongan (qty tidak diketahui)
+    if (tb > 0 && tot > 0){
+      const qty = Math.round(tot / tb);
+      bor.push({ activity_type, pekerjaan, satuan, qty, tarif_borongan: tb, total_rp: tot });
+    }
+  });
+
+  const payloadV2 = { row, items:{ hk, borongan: bor } };
+  return pushPDOv2(payloadV2, sess);
+}
+
+/**
+ * Struktur BARU:
+ * body = { row: {...}, items: { hk:[], borongan:[] } }
+ * - hk:      [{ pekerjaan, satuan, luas_ha, hk, tipe:'SKU'|'BHL'|'', total_rp }]
+ * - borongan:[{ pekerjaan, satuan, qty, tarif_borongan, total_rp }]
+ */
+function pushPDOv2(body, sess){
   ensurePDO(); ensurePDOItems();
   const me = getUserFromSession(sess);
-  const row = body.row||{};
-  const items = body.items||[];
+  const row = body.row || {};
+  const items = body.items || {};
+  const hk = items.hk || [];
+  const bor = items.borongan || [];
 
   // Hitung total
-  const total = (items||[]).reduce((a,b)=> a + Number(b.total_rp||0), 0);
+  const totalHK  = hk.reduce((a,b)=> a + Number(b.total_rp||0), 0);
+  const totalBor = bor.reduce((a,b)=> a + Number(b.total_rp||0), 0);
+  const totalPremi = Number(row.premi_panen||0) + Number(row.premi_non_panen||0);
+  const total = totalHK + totalBor + totalPremi;
 
+  // Nomor: gunakan yang dikirim, jika kosong fallback pola lama (front-end sekarang sudah auto)
   const nomor = row.nomor || `PDO-${(me.divisi||'XX')}-${nowStampWIB()}`;
 
+  // Header (summary)
   const summary = {
     nomor,
     periode: row.periode||'',
-    estate_id: Number(row.estate_id||me.estate_id||0),
-    rayon_id: Number(row.rayon_id||me.rayon_id||0),
+    estate_id: String(row.estate_id ?? me.estate_id ?? '').trim(),
+    rayon_id:  String(row.rayon_id  ?? me.rayon_id  ?? '').trim(),
     divisi_id: row.divisi_id||me.divisi||'',
     ref_rkb: row.ref_rkb||'',
     upah_hk_bhl: Number(row.upah_hk_bhl||0),
@@ -1152,55 +1370,147 @@ function pushPDO(body, sess){
     premi_panen: Number(row.premi_panen||0),
     premi_non_panen: Number(row.premi_non_panen||0),
     total_rp: total,
-    status: 'ASKP', // menunggu Askep
-    asst_ts: nowStampWIB(),
-    askep_ts: '',
-    manager_ts: '',
+    status: 'submitted',              // menunggu Askep
+    asst_ts: row.created_ts || nowSigWIB(), // tanda tangan Asisten, pakai format DD/MM/YY-hh:mm:ss
+    askep_ts: row.askep_ts || '',
+    manager_ts: row.manager_ts || '',
     created_by: me.username||'',
     created_at: nowIso(),
     updated_at: nowIso(),
   };
 
   // Upsert header
-  const s = ensurePDO();
-  upsertRow(s, 'nomor', summary);
+  const sHdr = ensurePDO();
+  upsertRow(sHdr, 'nomor', summary);
 
-  // Replace details
-  const si = ensurePDOItems();
-  const all = getAll(si).filter(x=> String(x.nomor)!==String(nomor));
-  // clear & reinsert – quick way
-  si.clear(); headers(si, ['nomor','idx','activity_type','pekerjaan','satuan_borongan','tarif_borongan','luas_ha','jlh_hk','total_rp']);
-  const rows = all.map(x=>[x.nomor,x.idx,x.activity_type,x.pekerjaan,x.satuan_borongan,x.tarif_borongan,x.luas_ha,x.jlh_hk,x.total_rp]);
-  (items||[]).forEach((it,i)=>{
-    rows.push([nomor, i+1, it.activity_type||'', it.pekerjaan||'', it.satuan_borongan||'', Number(it.tarif_borongan||0), Number(it.luas_ha||0), Number(it.jlh_hk||0), Number(it.total_rp||0)]);
+  // Rebuild detail sheet (pertahankan data nomor lain, konversi bila skema lama)
+  const sItm = ensurePDOItems();
+  const oldAll = getAll(sItm) || [];
+
+  // Konversi semua baris lama ke skema baru (jika sheet sebelumnya pakai kolom lama)
+  const keep = oldAll.filter(x => String(x.nomor) !== String(nomor)).map(x => {
+    // deteksi apakah baris sudah skema baru
+    const hasNewCols = ('tipe_item' in x) || ('qty' in x) || ('tarif_borongan' in x) || ('tipe_hk' in x) || ('activity_type' in x);
+if (hasNewCols){
+  return [
+    x.nomor || '', x.tipe_item || '', x.activity_type || '', Number(x.idx||0), x.pekerjaan||'', x.satuan||'',
+    Number(x.luas_ha||0), Number(x.hk||0), String(x.tipe_hk||''), Number(x.total_rp||0),
+    Number(x.qty||0), Number(x.tarif_borongan||0)
+  ];
+}else{
+  return [
+    x.nomor || '', (Number(x.jlh_hk||0)>0 ? 'HK' : 'BOR'),
+    String(x.activity_type||x.activity||''),   // ← best-effort dari skema lama
+    Number(x.idx||0), x.pekerjaan||'', x.satuan_borongan||'',
+    Number(x.luas_ha||0), Number(x.jlh_hk||0), '', Number(x.total_rp||0),
+    (Number(x.tarif_borongan||0)>0 && Number(x.total_rp||0)>0) ? Math.round(Number(x.total_rp)/Number(x.tarif_borongan)) : 0,
+    Number(x.tarif_borongan||0)
+  ];
+}
   });
-  if(rows.length){
-    si.getRange(1,1,1,9).setValues([['nomor','idx','activity_type','pekerjaan','satuan_borongan','tarif_borongan','luas_ha','jlh_hk','total_rp']]);
-    if(rows.length>0) si.getRange(2,1,rows.length,9).setValues(rows);
+
+  
+
+  // Build baris baru untuk nomor ini
+  const rowsNew = [];
+(hk||[]).forEach((it,i)=>{
+  rowsNew.push([
+    nomor, 'HK', it.activity_type||'', i+1,
+    it.pekerjaan||'', it.satuan||'',
+    Number(it.luas_ha||0), Number(it.hk||0), String(it.tipe||''), Number(it.total_rp||0),
+    0, 0
+  ]);
+});
+(bor||[]).forEach((it,i)=>{
+  rowsNew.push([
+    nomor, 'BOR', it.activity_type||'', (hk.length + i + 1),
+    it.pekerjaan||'', it.satuan||'',
+    0, 0, '', Number(it.total_rp||0),
+    Number(it.qty||0), Number(it.tarif_borongan||0)
+  ]);
+});
+
+  // Tulis ulang sheet items dengan header skema baru
+sItm.clear();
+headers(sItm, [
+  'nomor','tipe_item','activity_type','idx','pekerjaan','satuan',
+  'luas_ha','hk','tipe_hk','total_rp','qty','tarif_borongan'
+]);
+  const allRows = keep.concat(rowsNew);
+  if (allRows.length){
+    sItm.getRange(2,1,allRows.length,12).setValues(allRows);
   }
+
+  return {ok:true, nomor};
+}
+
+function pdoAskepComment(body, sess){
+  ensurePDOComments(); ensurePDO();
+  const me = getUserFromSession(sess);
+  const nomor = body.nomor, text = (body.text||'').toString();
+  if(!nomor || !text) return {ok:false, error:'Nomor & komentar wajib'};
+
+  const p = getAll(sh(PDO_SHEETS.PDO)).find(x=> String(x.nomor)===String(nomor));
+  if(!p) return {ok:false, error:'PDO tidak ditemukan'};
+
+  const id = Utilities.getUuid();
+  const toUser = p.created_by || '';
+  upsertRow(sh(PDO_SHEETS.PDO_COMMENTS),'id',{
+    id, nomor, role:'Askep', username:me.username, to_username:toUser,
+    comment:text, created_at: nowIso(), read_at:''
+  });
+
+  // kembalikan status ke draft (asisten perbaiki)
+  p.status = 'draft';
+  p.updated_at = nowIso();
+  upsertRow(sh(PDO_SHEETS.PDO),'nomor', p);
 
   return {ok:true};
 }
+
+function pdoManagerComment(body, sess){
+  ensurePDOComments(); ensurePDO();
+  const me = getUserFromSession(sess);
+  const nomor = body.nomor, text = (body.text||'').toString();
+  if(!nomor || !text) return {ok:false, error:'Nomor & komentar wajib'};
+
+  const p = getAll(sh(PDO_SHEETS.PDO)).find(x=> String(x.nomor)===String(nomor));
+  if(!p) return {ok:false, error:'PDO tidak ditemukan'};
+
+  const id = Utilities.getUuid();
+  const toUser = p.created_by || '';
+  upsertRow(sh(PDO_SHEETS.PDO_COMMENTS),'id',{
+    id, nomor, role:'Manager', username:me.username, to_username:toUser,
+    comment:text, created_at: nowIso(), read_at:''
+  });
+
+  // kembalikan status ke draft (asisten perbaiki)
+  p.status = 'draft';
+  p.updated_at = nowIso();
+  upsertRow(sh(PDO_SHEETS.PDO),'nomor', p);
+
+  return {ok:true};
+}
+
 
 function pdoListForAskep(body, sess){
   ensurePDO();
   const me = getUserFromSession(sess);
   const m = getAll(ensurePDO())
     .filter(x => String(x.rayon_id||'')===String(me.rayon_id||''))
-    .filter(x => String(x.status||'')==='ASKP');
+    .filter(x => String(x.status||'')==='submitted');
   return {ok:true, rows:m};
 }
 
 function pdoAskepApprove(body, sess){
-  ensurePDO();
   const s = ensurePDO();
   const nomor = body.nomor||'';
   const head = getAll(s);
   const idx = head.findIndex(x=> String(x.nomor)===String(nomor));
   if(idx<0) return {ok:false, error:'not found'};
   const row = head[idx];
-  row.status='MGR';
-  row.askep_ts = nowStampWIB();
+  row.status='askep_approved';
+  row.askep_ts = nowSigWIB();  // TTD Askep
   row.updated_at = nowIso();
   upsertRow(s, 'nomor', row);
   return {ok:true};
@@ -1211,20 +1521,19 @@ function pdoListForManager(body, sess){
   const me = getUserFromSession(sess);
   const m = getAll(ensurePDO())
     .filter(x => String(x.estate_id||'')===String(me.estate_id||''))
-    .filter(x => String(x.status||'')==='MGR');
+    .filter(x => String(x.status||'')==='askep_approved');
   return {ok:true, rows:m};
 }
 
 function pdoManagerApprove(body, sess){
-  ensurePDO();
   const s = ensurePDO();
   const nomor = body.nomor||'';
   const head = getAll(s);
   const idx = head.findIndex(x=> String(x.nomor)===String(nomor));
   if(idx<0) return {ok:false, error:'not found'};
   const row = head[idx];
-  row.status='DONE';
-  row.manager_ts = nowStampWIB();
+  row.status='full_approved';
+  row.manager_ts = nowSigWIB(); // TTD Manager
   row.updated_at = nowIso();
   upsertRow(s, 'nomor', row);
   return {ok:true};
@@ -1248,12 +1557,368 @@ function ktuRekapPDO(body, sess){
   return {ok:true, rows};
 }
 
-// WIB timestamp "DDMMYYYY.hhmmss"
-function nowStampWIB(){
-  const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
-  const d = new Date();
-  const zone = Utilities.formatDate(d, tz, 'ddMMyyyy.HHmmss');
-  return zone;
-}
-// === [END PDO MODULE] =======================================================
+function getPdoDetail(body, sess){
+  const nomor = (body.nomor||'').toString().trim();
+  if(!nomor) return {ok:false, error:'nomor required'};
 
+  const me = getUserFromSession(sess);
+  const r = getAll(sh(PDO_SHEETS.PDO)).find(x=> String(x.nomor)===nomor);
+  if(!r) return {ok:false, error:'PDO tidak ditemukan'};
+
+  // Akses: Admin semua; Askep filter rayon; Manager/KTU filter estate; Asisten hanya miliknya
+  const role = String(me.role||'').toLowerCase();
+  const isOwner = String(r.created_by||'').toLowerCase() === String(me.username||'').toLowerCase();
+  const allowed =
+    role==='admin' ||
+    (role==='askep'   && String(r.rayon_id||'')  === String(me.rayon_id||'')) ||
+    (role==='manager' && String(r.estate_id||'') === String(me.estate_id||'')) ||
+    (role==='ktu'     && String(r.estate_id||'') === String(me.estate_id||'')) ||
+    (role==='asisten' && isOwner);
+  if(!allowed) return {ok:false, error:'Unauthorized'};
+
+  const items = getAll(sh(PDO_SHEETS.PDO_ITEMS)).filter(i => String(i.nomor)===nomor);
+  const comments = getAll(sh(PDO_SHEETS.PDO_COMMENTS)).filter(c => String(c.nomor)===nomor);
+
+  // hitung ulang total dari items + premi (jaga konsistensi)
+  const totalHK  = items.filter(i=>String(i.tipe_item)==='HK').reduce((a,b)=>a+Number(b.total_rp||0),0);
+  const totalBor = items.filter(i=>String(i.tipe_item)==='BOR').reduce((a,b)=>a+Number(b.total_rp||0),0);
+  const totalPremi = Number(r.premi_panen||0) + Number(r.premi_non_panen||0);
+  const header = Object.assign({}, r, { total_rp: totalHK+totalBor+totalPremi });
+
+  return {ok:true, header, items, comments};
+}
+
+function clearPDOItemsByNomor(nomor){
+  const s = ensurePDOItems();
+  const all = getAll(s);
+  for (let i = all.length - 1; i >= 0; i--){
+    if (String(all[i].nomor) === String(nomor)) s.deleteRow(i+2);
+  }
+}
+
+
+// === [END PDO MODULE] =====================================================
+
+
+
+// === [START RKH MODULE] =====================================================
+
+const RKH_SHEETS = {
+  RKH: 'rkh',
+  RKH_ITEMS: 'rkh_items',
+  RKH_BAHAN: 'rkh_bahan'
+};
+
+function ensureRKH(){
+  const s = sh(RKH_SHEETS.RKH);
+  if (s.getLastRow() < 1){
+    headers(s, [
+      'nomor','tanggal','periode',
+      'plant_id','estate_id','rayon_id','divisi_id',
+      'divisi','estate_full',
+      'ref_rkb',                 // referensi RKB
+      'status',                  // 'created'
+      'username','created_at','updated_at'
+    ]);
+  }
+  return s;
+}
+function ensureRKHItems(){
+  const s = sh(RKH_SHEETS.RKH_ITEMS);
+  if (s.getLastRow() < 1){
+    headers(s,[
+      'nomor','idx','pekerjaan','activity_type',
+      'lokasi',           // gabungan nama lokasi (koma)
+      'volume','satuan',
+      'hk_unit','pct_bhl','pct_sku','pct_bhb',
+      'hk_bhl','hk_sku','hk_bhb','hk_total',
+      'pengawas','created_at'
+    ]);
+  }
+  return s;
+}
+function ensureRKHBahan(){
+  const s = sh(RKH_SHEETS.RKH_BAHAN);
+  if (s.getLastRow() < 1){
+    headers(s,[
+      'nomor','item_idx','no_material','nama','jumlah','satuan','created_at'
+    ]);
+  } else {
+    // jaga-jaga migrasi no_material
+    const lastCol = s.getLastColumn();
+    const head = s.getRange(1,1,1,lastCol).getValues()[0];
+    if (!head.includes('no_material')) {
+      s.insertColumnsAfter(lastCol || 1, 1);
+      const newHead = head.concat(['no_material']);
+      s.getRange(1,1,1,newHead.length).setValues([newHead]).setFontWeight('bold');
+    }
+  }
+  return s;
+}
+
+// Helper: YYYY-MM dari Date
+function yyyymmFromDate_(d){
+  const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
+  return Utilities.formatDate(d, tz, 'yyyy-MM');
+}
+
+function lokasiToString_(lok){
+  if (Array.isArray(lok)){
+    return lok
+      .map(l => {
+        if (l == null) return '';
+        if (typeof l === 'string') return l;
+        if (typeof l === 'object') return String(l.name || l.nama || l.blok || l.label || l.id || '');
+        return String(l);
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+  if (typeof lok === 'string') return lok;
+  if (lok && typeof lok === 'object') return String(lok.name || lok.nama || lok.blok || lok.label || lok.id || '');
+  return '';
+}
+
+function createRKHFromRKB(body, sess){
+  ensureRKH(); ensureRKHItems(); ensureRKHBahan(); ensureRKB(); ensureRKBItems(); ensureRKBBahan();
+
+  const me = getUserFromSession(sess);
+  const ref_rkb = (body.ref_rkb||'').toString().trim();
+  const tanggalStr = (body.tanggal||'').toString().trim(); // ISO atau yyyy-mm-dd
+  if(!ref_rkb || !tanggalStr) return {ok:false, error:'ref_rkb & tanggal wajib'};
+
+  const tanggal = new Date(tanggalStr);
+  if (isNaN(tanggal.getTime())) return {ok:false, error:'Format tanggal tidak valid'};
+
+  // Ambil header RKB + items + bahan
+  const rkb = getAll(sh(SHEETS.RKB)).find(r => String(r.nomor)===ref_rkb);
+  if (!rkb) return {ok:false, error:'RKB tidak ditemukan'};
+
+  // Scope (estate/rayon/divisi/plant) – pakai helper yang sudah ada
+  const scope = resolveScopeFromRow_(rkb);
+
+  const itemsR = getAll(sh(SHEETS.RKB_ITEMS)).filter(i => String(i.nomor)===ref_rkb);
+  const bahanR = getAll(sh(SHEETS.RKB_BAHAN)).filter(b => String(b.nomor)===ref_rkb);
+
+  // Nomor RKH
+  const nomor = `RKH-${(scope.divisi_id||'XX')}-${nowStampWIB()}`;
+
+  // Ringkasan RKH
+  const summary = {
+    nomor,
+    tanggal: Utilities.formatDate(tanggal, Session.getScriptTimeZone()||'Asia/Jakarta', 'yyyy-MM-dd'),
+    periode: yyyymmFromDate_(tanggal),
+    plant_id:  scope.plant_id||'',
+    estate_id: scope.estate_id||'',
+    rayon_id:  scope.rayon_id||'',
+    divisi_id: scope.divisi_id||'',
+    divisi:    rkb.divisi || scope.divisi_id || '',
+    estate_full: scope.estate_full || rkb.estate_full || '',
+    ref_rkb: ref_rkb,
+    status: 'created',           // final di Asisten
+    username: me.username||'',
+    created_at: nowIso(),
+    updated_at: nowIso()
+  };
+  upsertRow(ensureRKH(), 'nomor', summary);
+
+  // Siapkan header kolom detail
+  const si = ensureRKHItems();
+  const sb = ensureRKHBahan();
+  const headI = si.getRange(1,1,1,si.getLastColumn()).getValues()[0];
+  const headB = sb.getRange(1,1,1,sb.getLastColumn()).getValues()[0];
+
+  // Buat rows detail: volume dibagi 20
+  const insertsI = [];
+  (itemsR||[]).forEach((it, idx)=>{
+    const vol = Number(it.volume||0) / 20; // ← skala harian
+    const hk_unit = Number(it.hk_unit||0);
+    const base = vol * hk_unit;
+    const pct_bhl = Number(it.pct_bhl||0);
+    const pct_sku = Number(it.pct_sku||0);
+    const pct_bhb = Number(it.pct_bhb||0);
+    const hk_bhl = base * (pct_bhl/100);
+    const hk_sku = base * (pct_sku/100);
+    const hk_bhb = base * (pct_bhb/100);
+    const hk_total = hk_bhl + hk_sku + hk_bhb;
+
+    const objI = {
+      nomor, idx: idx+1,
+      pekerjaan: it.pekerjaan||'',
+      activity_type: it.activity_type||'',
+      lokasi: it.lokasi||'',
+      volume: vol,
+      satuan: it.satuan||'',
+      hk_unit,
+      pct_bhl, pct_sku, pct_bhb,
+      hk_bhl, hk_sku, hk_bhb, hk_total,
+      pengawas: it.pengawas||'',
+      created_at: nowIso()
+    };
+    insertsI.push(headI.map(h => objI[h]!==undefined ? objI[h] : ''));
+  });
+
+  // Bahan: jumlah dibagi 20 juga? (Jika bahan dipakai proporsional harian)
+  // Jika TIDAK ingin dibagi 20, hapus pembagian di bawah.
+  const insertsB = [];
+  (bahanR||[]).forEach(b=>{
+    const objB = {
+      nomor,
+      item_idx: Number(b.item_idx||0),
+      no_material: b.no_material || '',
+      nama: b.nama || '',
+      jumlah: Number(b.jumlah||0) / 20,   // ← skala harian (ubah jika ingin tetap)
+      satuan: b.satuan || '',
+      created_at: nowIso()
+    };
+    insertsB.push(headB.map(h => objB[h]!==undefined ? objB[h] : ''));
+  });
+
+  // Tulis detail
+  function appendRows(sheet, rowsArr){
+    if(!rowsArr.length) return;
+    var startRow = sheet.getLastRow() + 1;
+    var needLast = startRow + rowsArr.length - 1;
+    var maxRows  = sheet.getMaxRows();
+    if(needLast > maxRows){
+      sheet.insertRowsAfter(maxRows, needLast - maxRows);
+    }
+    sheet.getRange(startRow, 1, rowsArr.length, rowsArr[0].length).setValues(rowsArr);
+  }
+  appendRows(si, insertsI);
+  appendRows(sb, insertsB);
+
+  return {ok:true, nomor};
+}
+
+function pushRKH(body, sess){
+  ensureRKH(); ensureRKHItems(); ensureRKHBahan();
+
+  const me = getUserFromSession(sess);
+  const row = body.row || {};
+  const items = body.items || [];
+  const bahan = body.bahan || [];
+
+  // nomor
+  const nomor = row.nomor || `RKH-${(row.divisi||'XX')}-${nowStampWIB()}`;
+
+  // derive periode dari tanggal
+  const tanggal = new Date(row.tanggal || new Date());
+  const periode = row.periode || yyyymmFromDate_(tanggal);
+
+  // scope dari row atau username
+  const scope = resolveScopeFromRow_(row.username ? { username: row.username, divisi_id: row.divisi_id, estate_id: row.estate_id, rayon_id: row.rayon_id, plant_id: row.plant_id, estate_full: row.estate_full } : row);
+
+  const summary = {
+    nomor,
+    tanggal: Utilities.formatDate(tanggal, Session.getScriptTimeZone()||'Asia/Jakarta', 'yyyy-MM-dd'),
+    periode,
+    plant_id:  scope.plant_id||'',
+    estate_id: scope.estate_id||'',
+    rayon_id:  scope.rayon_id||'',
+    divisi_id: scope.divisi_id||'',
+    divisi:    row.divisi || scope.divisi_id || '',
+    estate_full: scope.estate_full || row.estate_full || '',
+    ref_rkb: row.ref_rkb || '',
+    status: 'created',
+    username: me.username||'',
+    created_at: nowIso(),
+    updated_at: nowIso()
+  };
+  upsertRow(ensureRKH(), 'nomor', summary);
+
+  // Hapus detail lama untuk nomor ini, lalu tulis baru
+  const si = ensureRKHItems();
+  const sb = ensureRKHBahan();
+
+  function clearByNomor_(sheet){
+    const all = getAll(sheet);
+    for (let i=all.length-1;i>=0;i--){
+      if (String(all[i].nomor)===String(nomor)) sheet.deleteRow(i+2);
+    }
+  }
+  clearByNomor_(si);
+  clearByNomor_(sb);
+
+  const headI = si.getRange(1,1,1,si.getLastColumn()).getValues()[0];
+  const headB = sb.getRange(1,1,1,sb.getLastColumn()).getValues()[0];
+
+  const rowsI = (items||[]).map((it, idx)=>{
+    const vol = Number(it.volume||0);
+    const hk_unit = Number(it.hk_unit||0);
+    const base = vol * hk_unit;
+    const pct_bhl = Number(it.pct_bhl||0);
+    const pct_sku = Number(it.pct_sku||0);
+    const pct_bhb = Number(it.pct_bhb||0);
+    const hk_bhl = base * (pct_bhl/100);
+    const hk_sku = base * (pct_sku/100);
+    const hk_bhb = base * (pct_bhb/100);
+    const hk_total = hk_bhl + hk_sku + hk_bhb;
+
+    const objI = {
+      nomor, idx: (it.idx || idx+1),
+      pekerjaan: it.pekerjaan||'',
+      activity_type: it.activity_type||'',
+      lokasi: lokasiToString_(it.lokasi),
+      volume: vol,
+      satuan: it.satuan||'',
+      hk_unit,
+      pct_bhl, pct_sku, pct_bhb,
+      hk_bhl, hk_sku, hk_bhb, hk_total,
+      pengawas: it.pengawas||'',
+      created_at: nowIso()
+    };
+    return headI.map(h => objI[h]!==undefined ? objI[h] : '');
+  });
+
+  const rowsB = (bahan||[]).map(b=>{
+    const objB = {
+      nomor,
+      item_idx: Number(b.item_idx||b.idx||0),
+      no_material: b.no_material || '',
+      nama: b.nama || '',
+      jumlah: Number(b.jumlah||0),
+      satuan: b.satuan || '',
+      created_at: nowIso()
+    };
+    return headB.map(h => objB[h]!==undefined ? objB[h] : '');
+  });
+
+  if (rowsI.length) si.getRange(si.getLastRow()+1, 1, rowsI.length, rowsI[0].length).setValues(rowsI);
+  if (rowsB.length) sb.getRange(sb.getLastRow()+1, 1, rowsB.length, rowsB[0].length).setValues(rowsB);
+
+  return {ok:true, nomor};
+}
+
+
+function getRkhDetail(body, sess){
+  const nomor = (body.nomor||'').toString().trim();
+  if(!nomor) return {ok:false, error:'nomor required'};
+
+  const me = getUserFromSession(sess);
+  const r = getAll(sh(RKH_SHEETS.RKH)).find(x=> String(x.nomor)===nomor);
+  if(!r) return {ok:false, error:'RKH tidak ditemukan'};
+
+  // Akses: Admin semua; Askep = rayon; Manager/KTU = estate; Asisten = owner
+  const role = String(me.role||'').toLowerCase();
+  const isOwner = String(r.username||'').toLowerCase() === String(me.username||'').toLowerCase();
+  const allowed =
+    role==='admin' ||
+    (role==='askep'   && String(r.rayon_id||'')  === String(me.rayon_id||'')) ||
+    (role==='manager' && String(r.estate_id||'') === String(me.estate_id||'')) ||
+    (role==='ktu'     && String(r.estate_id||'') === String(me.estate_id||'')) ||
+    (role==='asisten' && isOwner);
+
+  if(!allowed) return {ok:false, error:'Unauthorized'};
+
+  const items = getAll(sh(RKH_SHEETS.RKH_ITEMS)).filter(i => String(i.nomor)===nomor);
+  const bahan = getAll(sh(RKH_SHEETS.RKH_BAHAN)).filter(b => String(b.nomor)===nomor);
+
+  // hk_total summary
+  const hk_total = items.reduce((a,i)=> a + Number(i.hk_total||0), 0);
+  const header = Object.assign({}, r, { hk_total });
+
+  return {ok:true, header, items, bahan};
+}
+
+// === [END RKH MODULE] =====================================================

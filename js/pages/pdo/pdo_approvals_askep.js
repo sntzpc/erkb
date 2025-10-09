@@ -47,8 +47,8 @@ Pages.pdoApprovalsAskep = function () {
       if (preferLocal) {
         const cached = getActualPdo();
         if (Array.isArray(cached) && cached.length) {
-          // status menunggu Askep di backend = 'ASKP'
-          rows = cached.filter(x => String(x.status||'').toUpperCase() === 'ASKP');
+          // status menunggu Askep di backend = 'submitted'
+          rows = cached.filter(x => String(x.status||'').toLowerCase() === 'submitted');
         }
       }
       if (!rows.length) {
@@ -155,7 +155,7 @@ Pages.pdoApprovalsAskep = function () {
       // update cache → status balik ke draft (mengikuti backend pdoAskepComment)
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DRAFT'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       // remove baris dari UI
       const tr = root.querySelector(`button[data-n="${nomor}"]`)?.closest('tr');
       if (tr) tr.remove();
@@ -165,7 +165,7 @@ Pages.pdoApprovalsAskep = function () {
       queueAction('pdoAskepComment', { nomor, text });
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='DRAFT'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       const tr = root.querySelector(`button[data-n="${nomor}"]`)?.closest('tr');
       if (tr) tr.remove();
       U.toast('Offline: komentar diantrikan ke Outbox.','warning');
@@ -184,7 +184,7 @@ Pages.pdoApprovalsAskep = function () {
 
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='MGR'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
 
       if (tr) tr.remove();
       U.toast('Approved.','success');
@@ -192,7 +192,7 @@ Pages.pdoApprovalsAskep = function () {
       queueAction('pdoAskepApprove', { nomor });
       const act = getActualPdo();
       const idx = act.findIndex(x=> String(x.nomor)===String(nomor));
-      if(idx>=0){ act[idx].status='MGR'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
+      if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualPdo(act); }
       if (tr) tr.remove();
       U.toast('Offline: approval diantrikan ke Outbox.','warning');
     }finally{
