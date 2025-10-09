@@ -182,7 +182,15 @@ function readHistoryPdoFromActuals(){
   const list = STORE.getActual?.(PDO_ACT_KEYS.header) || [];
   const me   = (SESSION.profile()?.username || '').toLowerCase();
 
-  // tampilkan hanya milik user aktif (samakan field username bila ada)
+  // siapkan map total dari items kalau header tidak punya total_rp
+  const allItems = (STORE.getActual?.('pdo_items') || STORE.getActual?.('kpl.actual.pdo_items') || []);
+  const sumByNomor = {};
+  for(const it of allItems){
+    const no = String(it.nomor||'');
+    const val = Number(it.total_rp||0);
+    sumByNomor[no] = (sumByNomor[no]||0) + (isFinite(val)?val:0);
+  }
+
   const mine = list.filter(x => String(x.username||'').toLowerCase() === me || !x.username);
 
   return mine.map(x => ({
@@ -200,11 +208,13 @@ function readHistoryPdoFromActuals(){
     target_produksi_ton: Number(x.target_produksi_ton||0),
     created_ts:  x.created_ts || x.created_at || '',
     updated_at:  x.updated_at || '',
-    // list view tidak perlu items; detail akan diambil saat cetak/lihat
+    // >>> tambahkan total_rp agar list bisa pakai totalPrimary
+    total_rp:    Number(x.total_rp ?? sumByNomor[String(x.nomor)] ?? 0),
     hk: [], borongan: [],
     __history: true
   }));
 }
+
 
 // ===== Merge unik by nomor (utama = draft lokal) =====
 function mergeUniqueByNomor(primaryArr, secondaryArr){
@@ -505,13 +515,13 @@ function buildDetailHtml(one){
   const totalPDO = sumHK + sumBOR + Number(h.premi_panen||0) + Number(h.premi_non_panen||0);
 
   const rowsHK = HK.map(r=>`
-    <tr>
-      <td>${r.activity_type||''}</td>
-      <td>${r.pekerjaan||''}</td>
-      <td class="text-end">${(r.luas_ha||0).toLocaleString('id-ID')}</td>
-      <td class="text-end">${(r.hk||0).toLocaleString('id-ID')}</td>
-      <td class="text-end">${(r.total_rp||0).toLocaleString('id-ID')}</td>
-    </tr>`).join('') || `<tr><td colspan="5" class="muted">Tidak ada pekerjaan HK.</td></tr>`;
+  <tr>
+    <td>${r.activity_type||''}</td>
+    <td>${r.pekerjaan||''}${r.tipe_hk ? ` <span class="muted">(${r.tipe_hk})</span>` : ''}</td>
+    <td class="text-end">${(r.luas_ha||0).toLocaleString('id-ID')}</td>
+    <td class="text-end">${(r.hk||0).toLocaleString('id-ID')}</td>
+    <td class="text-end">${(r.total_rp||0).toLocaleString('id-ID')}</td>
+  </tr>`).join('') || `<tr><td colspan="5" class="muted">Tidak ada pekerjaan HK.</td></tr>`;
 
   const rowsBOR = BOR.map(r=>`
     <tr>
@@ -630,15 +640,175 @@ function buildDetailHtml(one){
   const w = window.open('', '_blank'); w.document.write(html); w.document.close();
 }
 
+// === REPLACE: Bangun detail dari actuals STORE (server → read-only, tanpa progress) ===
+async function buildDetailFromActuals(nomor){
+  try{
+    await resolvePdoActualKeys();
 
-  // ===== Row actions – gunakan buffer agar router pasti match =====
-  function viewRow(nomor){
-    const d = (getDrafts()||[]).find(x=> String(x.nomor)===String(nomor));
-    if(!d){ U.alert('Draft tidak ditemukan.'); return; }
+    const listHdr = STORE.getActual?.(PDO_ACT_KEYS.header) || [];
+    const hdr = listHdr.find(x => String(x.nomor) === String(nomor));
+    if(!hdr) return null;
+
+    // --- helper normalisasi HK & BOR ---
+    const normHK = (row)=>{
+      const hkSku = Number(row.hk_sku ?? row.hkSKU ?? row.hk_s ?? 0);
+      const hkBhl = Number(row.hk_bhl ?? row.hkBHL ?? row.hk_b ?? 0);
+
+      let tipeHK = String(row.tipe_hk ?? row.jenis_tk ?? row.tipe_tk ?? '')
+                    .trim().toUpperCase();
+      if(!tipeHK){
+        if(hkBhl>0 && hkSku===0) tipeHK = 'BHL';
+        else if(hkSku>0 && hkBhl===0) tipeHK = 'SKU';
+        else tipeHK = 'SKU'; // default aman bila tidak jelas
+      }
+
+      const hkUnified = (tipeHK==='BHL'
+        ? (hkBhl || Number(row.jlh_hk ?? row.hk ?? 0))
+        : (hkSku || Number(row.jlh_hk ?? row.hk ?? 0)));
+
+      return {
+        ...row,
+        tipe_item: 'HK',
+        tipe_hk: tipeHK,                       // <<— penting agar bisa ditampilkan
+        hk: Number(hkUnified || 0),            // <<— dipakai di tabel
+        luas_ha: Number(row.luas_ha ?? row.luas ?? 0),
+        total_rp: Number(row.total_rp ?? row.total ?? 0)
+      };
+    };
+
+    const normBOR = (row)=>{
+      const qty   = Number(row.qty ?? row.volume ?? 0);
+      const harga = Number(row.tarif_borongan ?? row.harga_borongan ?? row.harga ?? 0);
+      let total = 0;
+      if (row.total_rp != null)      total = Number(row.total_rp) || 0;
+      else if (row.total != null)    total = Number(row.total) || 0;
+      else                           total = (Number(row.qty ?? row.volume) || 0) * (Number(row.tarif_borongan ?? row.harga_borongan ?? row.harga) || 0);
+      return {
+        ...row,
+        tipe_item: 'BOR',
+        qty, tarif_borongan: harga,
+        total_rp: total
+      };
+    };
+
+    // 1) Koleksi items bila sudah terpisah
+    let itemsHK  = STORE.getActual?.(PDO_ACT_KEYS.hk)  || [];
+    let itemsBOR = STORE.getActual?.(PDO_ACT_KEYS.bor) || [];
+
+    // 2) Fallback: satu koleksi gabungan (pdo_items / kpl.actual.pdo_items)
+    if((!itemsHK.length && !itemsBOR.length) && typeof STORE?.getActual === 'function'){
+      const all = STORE.getActual('pdo_items') || STORE.getActual('kpl.actual.pdo_items') || [];
+      const filtered = (all||[]).filter(x => String(x.nomor)===String(nomor));
+
+      // klasifikasi mutual-exclusive
+      const classify = (row)=>{
+        if(row==null) return null;
+        if('tipe_item' in row){
+          const t = String(row.tipe_item).toUpperCase();
+          if(t==='HK')  return 'HK';
+          if(t==='BOR') return 'BOR';
+        }
+        if(row.qty!=null || row.tarif_borongan!=null || row.harga_borongan!=null) return 'BOR';
+        if(row.hk!=null || row.luas_ha!=null || row.jlh_hk!=null || row.hk_sku!=null || row.hk_bhl!=null) return 'HK';
+        return null;
+      };
+
+      itemsHK  = filtered.filter(x => classify(x)==='HK').map(normHK);
+      itemsBOR = filtered.filter(x => classify(x)==='BOR').map(normBOR);
+    }else{
+      // sudah terpisah: filter per nomor + normalisasi
+      itemsHK  = (itemsHK  || []).filter(x => String(x.nomor)===String(nomor)).map(normHK);
+      itemsBOR = (itemsBOR || []).filter(x => String(x.nomor)===String(nomor)).map(normBOR);
+    }
+
+    const header = {
+      nomor: hdr.nomor,
+      periode: fPeriode(hdr.periode),
+      estate_id: hdr.estate_id,
+      rayon_id:  hdr.rayon_id,
+      divisi_id: hdr.divisi_id || hdr.divisi || '',
+      ref_rkb:   hdr.ref_rkb || '',
+      upah_hk_sku: Number(hdr.upah_hk_sku||0),
+      upah_hk_bhl: Number(hdr.upah_hk_bhl||0),
+      premi_panen: Number(hdr.premi_panen||0),
+      premi_non_panen: Number(hdr.premi_non_panen||0),
+      target_produksi_ton: Number(hdr.target_produksi_ton||0),
+      created_ts: hdr.created_ts || hdr.created_at || '',
+      asst_ts:    hdr.asst_ts || '',
+      askep_ts:   hdr.askep_ts || '',
+      manager_ts: hdr.manager_ts || '',
+      status:     hdr.status || 'submitted',
+    };
+
+    const items = [...itemsHK, ...itemsBOR];
+    return { header, items };
+  }catch(e){
+    console.warn('[PDO] buildDetailFromActuals error:', e);
+    return null;
+  }
+}
+
+
+// ===== Row actions – gunakan buffer agar router pasti match =====
+async function viewRow(nomor){
+  // 1) Coba draft lokal dulu (perilaku lama)
+  const d = (getDrafts()||[]).find(x=> String(x.nomor)===String(nomor));
+  if(d){
     U.S.set('pdo.form.buffer', d);
     U.S.set('pdo.form.readonly', true);
     location.hash = '#/pdo/form';
+    return;
   }
+
+  // 2) Tidak ada draft → baca dari actuals (LOCAL), tanpa progress bar
+  const detail = await buildDetailFromActuals(nomor);
+  if(!detail){
+    U.alert('Data tidak ditemukan di draft maupun actuals lokal. Silakan Refresh Status atau sinkronisasi.');
+    return;
+  }
+
+  // pisah HK & BOR untuk buffer form
+  const hk  = (detail.items||[]).filter(x => String(x.tipe_item).toUpperCase()==='HK');
+  const bor = (detail.items||[]).filter(x => String(x.tipe_item).toUpperCase()==='BOR');
+
+  if(!hk.length && !bor.length){
+    U.alert('Detail item tidak ditemukan untuk nomor tersebut.');
+    return;
+  }
+
+  // simpan sedikit ke cache detail (opsional, bantu cetak)
+  setDetailToCache(nomor, detail.header, detail.items);
+
+  // bentuk buffer mirip draft → form tetap kompatibel
+  const buf = {
+    nomor: detail.header.nomor,
+    periode: detail.header.periode,
+    estate_id: detail.header.estate_id,
+    rayon_id:  detail.header.rayon_id,
+    divisi_id: detail.header.divisi_id,
+    ref_rkb:   detail.header.ref_rkb || '',
+    upah_hk_sku: Number(detail.header.upah_hk_sku||0),
+    upah_hk_bhl: Number(detail.header.upah_hk_bhl||0),
+    premi_panen: Number(detail.header.premi_panen||0),
+    premi_non_panen: Number(detail.header.premi_non_panen||0),
+    target_produksi_ton: Number(detail.header.target_produksi_ton||0),
+    created_ts: detail.header.created_ts || '',
+    asst_ts:    detail.header.asst_ts || '',
+    askep_ts:   detail.header.askep_ts || '',
+    manager_ts: detail.header.manager_ts || '',
+    status:     detail.header.status || 'submitted',
+    hk,
+    borongan: bor,
+    __history: true,
+    __serverLinked: true
+  };
+
+  U.S.set('pdo.form.buffer', buf);
+  U.S.set('pdo.form.readonly', true);
+  location.hash = '#/pdo/form';
+}
+
+
   function editRow(nomor){
     const d = (getDrafts()||[]).find(x=> String(x.nomor)===String(nomor));
     if(!d){ U.alert('Draft tidak ditemukan.'); return; }
@@ -857,7 +1027,7 @@ const histBadge = isHistory
   <td><span class="badge ${badgeCls}">${r.status||'draft'}</span>${histBadge}</td>
   <td>
     <div class="btn-group btn-group-sm">
-      ${btn('view','Lihat (detail)','view', r.nomor, !isHistory)}
+      ${btn('view','Lihat (detail)','view', r.nomor, true)}
       ${btn('edit','Edit','edit', r.nomor, canEdit)}
       ${btn('del','Hapus','del', r.nomor, canDelete)}
       ${btn('sync','Kirim/Sync ke server','sync', r.nomor, !!canSync)}

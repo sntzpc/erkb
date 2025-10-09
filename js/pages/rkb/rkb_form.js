@@ -5,254 +5,208 @@ Pages.rkbForm = function(){
   const profile = SESSION.profile();
   if(!profile){ location.hash='#/login'; return; }
 
-  // Masters from localStorage (pulled dari Home/Settings)
+  // ========== Helpers umum (aman tipe) ==========
+  function _str(v){ try { return String(v == null ? '' : v).trim(); } catch(_) { return ''; } }
+  function _num(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
+  function _isPos(n){ return _num(n) > 0; }
+  function _required(v){ return _str(v).length > 0; }
+
+  // Periode ke YYYY-MM (Asia/Jakarta)
+  function fPeriode(p){
+    if(!p) return '';
+    const s = String(p).trim();
+    if(/^\d{4}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
+    if(isNaN(d)) return s;
+    const tz='Asia/Jakarta';
+    const y = new Intl.DateTimeFormat('id-ID',{timeZone:tz, year:'numeric'}).format(d);
+    const m = new Intl.DateTimeFormat('id-ID',{timeZone:tz, month:'2-digit'}).format(d);
+    return `${y}-${m}`;
+  }
+
+  // ========== Masters dari localStorage ==========
   const M = {
-    activity: U.S.get('kpl.master.yactivity', []),
-    blok:     U.S.get('kpl.master.yblok', []),
-    komplek:  U.S.get('kpl.master.ykomplek', []),
-    // prefer ybahan (punya satuan_default), fallback ke ybahan
-    bahan:    U.S.get('kpl.master.ybahan', []),
-    org:      U.S.get('kpl.master.yorg_map', []),
-    estate:   U.S.get('kpl.master.yestate', [])
+    activity: U.S.get('kpl.master.yactivity', []) || [],
+    blok:     U.S.get('kpl.master.yblok', [])     || [],
+    komplek:  U.S.get('kpl.master.ykomplek', [])  || [],
+    bahan:    U.S.get('kpl.master.ybahan', [])    || [],
+    org:      U.S.get('kpl.master.yorg_map', [])  || [],
+    estate:   U.S.get('kpl.master.yestate', [])   || []
   };
 
-  // === Tambahan: index master bahan + helper ambil meta ===
-const bahanByName = {};
-(M.bahan || []).forEach(b => {
-  const nm = (b.nama_bahan || b.nama || '').toString().trim().toLowerCase();
-  if (!nm) return;
-  bahanByName[nm] = {
-    no_material: b.no_material || b.kode || b.code || b.id || b.no || '',  // fleksibel nama kolom master
-    satuan_default: b.satuan_default || b.satuan || ''
-  };
-});
-function getBahanMetaByName(name){
-  const key = (name||'').toString().trim().toLowerCase();
-  return key ? (bahanByName[key] || null) : null;
-}
-
-  // Cache satuan lokal utk bahan (nama_bahan -> satuan_default)
-  const BAHAN_UNIT_KEY = 'kpl.master.ybahan_unit';
-  const bahanUnitCache = U.S.get(BAHAN_UNIT_KEY, {}); // { 'gramoxone': 'L', ... }
-
-  // Index bahan by nama (lowercase)
-  const bahanIdx = {};
-  (M.bahan||[]).forEach(b=>{
-    const nama = (b.nama_bahan || b.nama || '').toString().trim();
-    if(nama) bahanIdx[nama.toLowerCase()] = b;
+  // ========== Indeks master bahan (1x saja) ==========
+  const bahanIndex = Object.create(null); // key: nama_bahan lowercase -> { no_material, satuan_default }
+  (M.bahan).forEach(b=>{
+    const key = _str(b.nama_bahan ?? b.nama).toLowerCase();
+    if(!key) return;
+    if(!bahanIndex[key]){
+      bahanIndex[key] = {
+        no_material: _str(b.no_material ?? b.kode ?? b.code ?? b.id ?? b.no),
+        satuan_default: _str(b.satuan_default ?? b.satuan)
+      };
+    }
   });
+  function getBahanMetaByName(name){
+    const key = _str(name).toLowerCase();
+    return key ? (bahanIndex[key] || null) : null;
+  }
 
-  // Map user to org (PT, Estate, Divisi, Telegram)
-  const myOrg = (M.org||[]).find(x=> (x.username||'').toLowerCase() === (profile.username||'').toLowerCase()) || {};
-  const DIVISI = myOrg.divisi_id || profile.divisi || 'UNKNOWN';
-  const estateObj = (M.estate||[]).find(e=> e.id === (myOrg.estate_id||'')) || {};
-  const ESTATE = estateObj.nama_panjang || profile.estate_full || 'UNKNOWN ESTATE';
+  // Cache satuan lokal utk bahan
+  const BAHAN_UNIT_KEY = 'kpl.master.ybahan_unit';
+  const bahanUnitCache = U.S.get(BAHAN_UNIT_KEY, {}) || {}; // { 'gramoxone':'L', ... }
 
-  // ===  Scope ID lengkap dari user/org ===
-const DIVISI_ID = myOrg.divisi_id || profile.divisi_id || DIVISI;
-const ESTATE_ID = myOrg.estate_id || profile.estate_id || '';
-const RAYON_ID  = myOrg.rayon_id  || profile.rayon_id  || '';
+  // ========== Scope organisasi dari user ==========
+  const myOrg = (M.org||[]).find(x=> _str(x.username).toLowerCase() === _str(profile.username).toLowerCase()) || {};
+  const DIVISI_ID = myOrg.divisi_id || profile.divisi_id || myOrg.divisi || profile.divisi || 'UNKNOWN';
+  const ESTATE_ID = myOrg.estate_id || profile.estate_id || '';
+  const RAYON_ID  = myOrg.rayon_id  || profile.rayon_id  || '';
+  const estateObj = (M.estate||[]).find(e=> _str(e.id) === _str(myOrg.estate_id)) || {};
+  const ESTATE_LABEL = estateObj.nama_panjang || profile.estate_full || 'UNKNOWN ESTATE';
+  const DIVISI_LABEL = myOrg.divisi_id || profile.divisi || 'UNKNOWN';
 
-  // Draft buffer (auto save) — header RKB + daftar pekerjaan (items)
-const DKEY = 'rkb.form.buffer';
-let F = U.S.get(DKEY, {
-  // label lama tetap
-  divisi: DIVISI,
-  // ===  scope id & label lengkap ===
-  divisi_id: DIVISI_ID,
-  estate_id: ESTATE_ID,
-  rayon_id:  RAYON_ID,
-  estate_full: ESTATE,
+  // ========== Draft buffer ==========
+  const DKEY = 'rkb.form.buffer';
+  let F = U.S.get(DKEY, {
+    divisi: DIVISI_LABEL,              // label tampilan (legacy)
+    divisi_id: DIVISI_ID,
+    estate_id: ESTATE_ID,
+    rayon_id:  RAYON_ID,
+    estate_full: ESTATE_LABEL,
+    periode: '',    // yyyy-mm
+    nomor: '',
+    items: [],
+  });
+  F.periode = fPeriode(F.periode);
+  if (F.nomor) F.status_label = computeRevisionTag(F.nomor);
 
-  periode: '', // yyyy-mm
-  nomor: '',
-  items: [],
-});
-// normalisasi periode & label awal
-F.periode = fPeriode(F.periode);
-if (F.nomor) {
-  F.status_label = computeRevisionTag(F.nomor);
-}
-// jika draft dari server & items kosong → isi dari actuals
-hydrateFromActualsIfNeeded();
+  const saveBuffer   = U.debounce(()=> U.S.set(DKEY, F), 300);
+  const saveBufferThin = ()=> U.S.set(DKEY, F);
 
-  // Satu "item pekerjaan" (yang sedang diisi di form atas)
+  // ========== HK & Validasi ==========
+  function computeHK(item){
+    const base = (_num(item.volume)) * (_num(item.hk_unit));
+    const BHL = base * (_num(item.pct_bhl)/100);
+    const SKU = base * (_num(item.pct_sku)/100);
+    const BHB = base * (_num(item.pct_bhb)/100);
+    return {BHL, SKU, BHB, total:(BHL+SKU+BHB)};
+  }
+
+  // pastikan bahan ada di master & punya no_material
+  function findBahanInMaster(name){
+    const meta = getBahanMetaByName(name);
+    if(meta && _str(meta.no_material)) return { nama: _str(name), no_material: meta.no_material, satuan_default: meta.satuan_default };
+    return null;
+  }
+
+  function validateHeaderStrict(){
+    if(!_required(F.periode)) return 'Periode wajib diisi.';
+    if(!_required(F.nomor))   return 'No RKB belum dibuat.';
+    return '';
+  }
+  function validateItemStrict(it){
+    if(!_required(it.pekerjaan)) return 'Jenis Pekerjaan wajib diisi.';
+    if(!Array.isArray(it.lokasi) || it.lokasi.length===0) return 'Lokasi minimal 1 baris.';
+    if(!_isPos(it.volume))  return 'Volume harus > 0.';
+    if(!_required(it.satuan)) return 'Satuan volume wajib diisi.';
+    if(!_isPos(it.hk_unit)) return 'HK/Unit harus > 0.';
+    if(!_required(it.pengawas)) return 'Nama Pengawas wajib diisi.';
+    const pBHL=_num(it.pct_bhl), pSKU=_num(it.pct_sku), pBHB=_num(it.pct_bhb);
+    if((pBHL+pSKU+pBHB)!==100) return 'Persentase HK harus berjumlah tepat 100% (BHL+SKU+BHB).';
+    return '';
+  }
+  function validateBahanList(list){
+    const arr = Array.isArray(list)?list:[];
+    for(let i=0;i<arr.length;i++){
+      const b=arr[i];
+      const nm=_str(b.nama), jm=_num(b.jumlah), st=_str(b.satuan);
+      const meta = findBahanInMaster(nm);
+      if(!meta) return `Bahan #${i+1} ("${nm}") tidak valid atau tidak ada di master.`;
+      if(!_str(meta.no_material)) return `Bahan #${i+1} ("${nm}") tidak memiliki No Material di master.`;
+      if(!(jm>0)) return `Bahan #${i+1} ("${nm}") jumlah harus > 0.`;
+      if(!st) return `Bahan #${i+1} ("${nm}") satuan wajib diisi.`;
+    }
+    return '';
+  }
+
+  // ========== Draft dari server → isi items dari actuals jika kosong ==========
+  hydrateFromActualsIfNeeded();
+  function hydrateFromActualsIfNeeded(){
+    if(!F || !F.__serverLinked) return;
+    if(Array.isArray(F.items) && F.items.length) return;
+
+    const getA = (k)=> (window.STORE && STORE.getActual) ? (STORE.getActual(k)||[]) : [];
+    const itemsAll = getA('rkb_items');
+    const bahanAll = getA('rkb_bahan');
+
+    const rowsI = itemsAll.filter(i => _str(i.nomor)===_str(F.nomor));
+    if(!rowsI.length) return;
+
+    const bahanByIdx = {};
+    bahanAll.filter(b => _str(b.nomor)===_str(F.nomor)).forEach(b=>{
+      const k = _str(b.item_idx);
+      (bahanByIdx[k] = bahanByIdx[k] || []).push({
+        nama: _str(b.nama),
+        jumlah: _num(b.jumlah),
+        satuan: _str(b.satuan)
+      });
+    });
+
+    F.items = rowsI.map(r=>{
+      const lokasiArr = _str(r.lokasi).split(',').map(s=>s.trim()).filter(Boolean)
+        .map(nm=>({type:'', name:nm, luas:undefined}));
+      const it = {
+        pekerjaan: _str(r.pekerjaan),
+        activity_type: _str(r.activity_type),
+        lokasi: lokasiArr,
+        volume: _num(r.volume),
+        satuan: _str(r.satuan),
+        hk_unit: _num(r.hk_unit),
+        pct_bhl: _num(r.pct_bhl),
+        pct_sku: _num(r.pct_sku),
+        pct_bhb: _num(r.pct_bhb),
+        bahan: bahanByIdx[_str(r.idx)] || [],
+        pengawas: _str(r.pengawas)
+      };
+      it.hk = computeHK(it);
+      return it;
+    });
+
+    F.periode = fPeriode(F.periode);
+    F.status  = 'draft';
+    F.status_label = computeRevisionTag(F.nomor);
+
+    if(!F.divisi_id) F.divisi_id = DIVISI_ID;
+    if(!F.estate_id) F.estate_id = ESTATE_ID;
+    if(!F.rayon_id)  F.rayon_id  = RAYON_ID;
+    if(!F.estate_full) F.estate_full = ESTATE_LABEL;
+
+    saveBufferThin();
+  }
+
+  // Revisi tag berdasar komentar Askep/Manager
+  function computeRevisionTag(nomor){
+    try{
+      const comments = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_comments')||[]) : [];
+      const revs = comments.filter(c =>
+        _str(c.nomor)===_str(nomor) &&
+        (['askep','manager'].includes(_str(c.role).toLowerCase()))
+      ).length;
+      return revs>0 ? `draft r${revs}` : 'draft';
+    }catch(_){ return 'draft'; }
+  }
+
+  // ========== Model item aktif ==========
   function defaultItem(){
     return {
-      pekerjaan: '',
-      activity_type: '',
-      lokasi: [], // {type:'blok'|'komplek', name:'KODE', luas:Number}
-      volume: 0,
-      satuan: 'Ha',
-      hk_unit: 0,
-      pct_bhl: 0,
-      pct_sku: 100,
-      pct_bhb: 0,
-      bahan: [], // {nama, jumlah, satuan}
-      pengawas: ''
+      pekerjaan:'', activity_type:'',
+      lokasi:[], volume:0, satuan:'Ha',
+      hk_unit:0, pct_bhl:0, pct_sku:100, pct_bhb:0,
+      bahan:[], pengawas:''
     };
   }
   let CUR = defaultItem();
 
-  const saveBuffer = U.debounce(()=> U.S.set(DKEY, F), 300);
-  function saveBufferThin(){ U.S.set(DKEY, F); }
-
-  function computeHK(item){
-    const base = (Number(item.volume)||0) * (Number(item.hk_unit)||0);
-    const BHL = base * ((Number(item.pct_bhl)||0)/100);
-    const SKU = base * ((Number(item.pct_sku)||0)/100);
-    const BHB = base * ((Number(item.pct_bhb)||0)/100);
-    return {BHL, SKU, BHB, total: (BHL+SKU+BHB)};
-  }
-
-  // === [VALIDATION] helpers ===
-function _str(v){ return String(v ?? '').trim(); }
-function _num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
-function _isPos(n){ return _num(n) > 0; }
-function _required(v){ return _str(v).length > 0; }
-
-// pastikan bahan ada di master dan punya no_material
-function findBahanInMaster(name){
-  const key = _str(name).toLowerCase();
-  if(!key) return null;
-  // pakai helper yang sudah ada bila tersedia:
-  const meta = (typeof getBahanMetaByName === 'function') ? getBahanMetaByName(key) : null;
-  if(meta && (meta.no_material||'').trim()) return { nama: name, no_material: meta.no_material, satuan_default: meta.satuan_default||'' };
-
-  // fallback (kalau getBahanMetaByName tidak cover):
-  const hit = (M.bahan||[]).find(b=>{
-    const nm = _str(b.nama_bahan||b.nama||'').toLowerCase();
-    return nm === key;
-  });
-  if(hit){
-    const noMat = _str(hit.no_material||hit.kode||hit.code||hit.id||hit.no||'');
-    if(noMat) return { nama: name, no_material: noMat, satuan_default: _str(hit.satuan_default||hit.satuan||'') };
-  }
-  return null;
-}
-
-// validasi header RKB
-function validateHeaderStrict(){
-  if(!_required(F.periode)) return 'Periode wajib diisi.';
-  if(!_required(F.nomor))   return 'No RKB belum dibuat.';
-  return '';
-}
-
-// validasi satu item pekerjaan
-function validateItemStrict(it){
-  if(!_required(it.pekerjaan)) return 'Jenis Pekerjaan wajib diisi.';
-  if(!Array.isArray(it.lokasi) || it.lokasi.length===0) return 'Lokasi minimal 1 baris.';
-  if(!_isPos(it.volume))  return 'Volume harus > 0.';
-  if(!_required(it.satuan)) return 'Satuan volume wajib diisi.';
-  if(!_isPos(it.hk_unit)) return 'HK/Unit harus > 0.';
-  if(!_required(it.pengawas)) return 'Nama Pengawas wajib diisi.';
-
-  const pBHL = _num(it.pct_bhl), pSKU = _num(it.pct_sku), pBHB = _num(it.pct_bhb);
-  if((pBHL+pSKU+pBHB) !== 100){
-    return 'Persentase HK harus berjumlah tepat 100% (BHL+SKU+BHB).';
-  }
-  return '';
-}
-
-// validasi daftar bahan pada item
-function validateBahanList(list){
-  const arr = Array.isArray(list) ? list : [];
-  for(let i=0; i<arr.length; i++){
-    const b = arr[i];
-    const nm = _str(b.nama);
-    const jm = _num(b.jumlah);
-    const st = _str(b.satuan);
-    // Harus match master + punya no_material
-    const meta = findBahanInMaster(nm);
-    if(!meta){ return `Bahan #${i+1} ("${nm}") tidak valid atau tidak ada di master.`; }
-    if(!_required(meta.no_material)){ return `Bahan #${i+1} ("${nm}") tidak memiliki No Material di master.`; }
-    if(!jm || jm<=0){ return `Bahan #${i+1} ("${nm}") jumlah harus > 0.`; }
-    if(!st){ return `Bahan #${i+1} ("${nm}") satuan wajib diisi.`; }
-  }
-  return '';
-}
-
-
-  // Format periode ke YYYY-MM (Asia/Jakarta)
-function fPeriode(p){
-  if(!p) return '';
-  const s = String(p).trim();
-  if(/^\d{4}-\d{2}$/.test(s)) return s;
-  const d = new Date(s);
-  if(isNaN(d)) return s;
-  const tz='Asia/Jakarta';
-  const y = new Intl.DateTimeFormat('id-ID',{timeZone:tz, year:'numeric'}).format(d);
-  const m = new Intl.DateTimeFormat('id-ID',{timeZone:tz, month:'2-digit'}).format(d);
-  return `${y}-${m}`;
-}
-
-// draft r1/r2/r3 berdasar jumlah komentar Askep/Manager pada nomor tsb
-function computeRevisionTag(nomor){
-  try{
-    const comments = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_comments')||[]) : [];
-    const revs = comments.filter(c =>
-      String(c.nomor)===String(nomor) &&
-      (String(c.role||'').toLowerCase()==='askep' || String(c.role||'').toLowerCase()==='manager')
-    ).length;
-    return revs>0 ? `draft r${revs}` : 'draft';
-  }catch(_){ return 'draft'; }
-}
-
-// Jika buffer berasal dari server (__serverLinked) & items kosong → muat dari actuals
-function hydrateFromActualsIfNeeded(){
-  if(!F || !F.__serverLinked) return;
-  if(Array.isArray(F.items) && F.items.length) return;
-
-  const itemsAll = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_items')||[]) : [];
-  const bahanAll = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb_bahan')||[]) : [];
-
-  const rowsI = itemsAll.filter(i => String(i.nomor)===String(F.nomor));
-  if(!rowsI.length) return; // tidak ada di cache actuals → biarkan kosong (bisa diambil via detail API di tempat lain)
-
-  const bahanByIdx = {};
-  bahanAll.filter(b => String(b.nomor)===String(F.nomor)).forEach(b=>{
-    const k = String(b.item_idx||'');
-    (bahanByIdx[k] = bahanByIdx[k] || []).push({
-      nama: b.nama || '',
-      jumlah: Number(b.jumlah||0),
-      satuan: b.satuan || ''
-    });
-  });
-
-  F.items = rowsI.map(r=>{
-    const lokasiArr = (String(r.lokasi||'').split(',').map(s=>s.trim()).filter(Boolean) || [])
-      .map(nm => ({type:'', name:nm, luas:undefined}));
-    const it = {
-      pekerjaan: r.pekerjaan || '',
-      activity_type: r.activity_type || '',
-      lokasi: lokasiArr,
-      volume: Number(r.volume||0),
-      satuan: r.satuan || '',
-      hk_unit: Number(r.hk_unit||0),
-      pct_bhl: Number(r.pct_bhl||0),
-      pct_sku: Number(r.pct_sku||0),
-      pct_bhb: Number(r.pct_bhb||0),
-      bahan: bahanByIdx[String(r.idx||'')] || [],
-      pengawas: r.pengawas || ''
-    };
-    it.hk = computeHK(it);
-    return it;
-  });
-
-  // pastikan periode normal, status diset 'draft' dengan tag revisi
-  F.periode = fPeriode(F.periode);
-  F.status  = 'draft';
-  F.status_label = computeRevisionTag(F.nomor);
-
-    // === jaga-jaga: isi scope ID bila kosong di buffer server-linked
-  if (!F.divisi_id) F.divisi_id = DIVISI_ID;
-  if (!F.estate_id) F.estate_id = ESTATE_ID;
-  if (!F.rayon_id)  F.rayon_id  = RAYON_ID;
-  if (!F.estate_full) F.estate_full = ESTATE;
-
-  saveBufferThin();
-}
-
+  // ========== UI ==========
   function hkBadge(hk){
     return `
       <div class="d-flex flex-wrap gap-2">
@@ -268,15 +222,15 @@ function hydrateFromActualsIfNeeded(){
     const hkNow = computeHK(CUR);
     root.innerHTML = `
     <div class="card shadow-sm"><div class="card-body">
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">Form RKB
-    ${F.__serverLinked ? '<span class="badge text-bg-light border ms-2" title="Data berasal dari server">server</span>' : ''}
-    ${String(F.status||'draft').toLowerCase()==='draft'
-        ? `<span class="badge text-bg-secondary ms-1">${F.status_label || computeRevisionTag(F.nomor||'')}</span>`
-        : ''}
-  </h4>
-  <div class="small text-muted">${ESTATE} · ${DIVISI}</div>
-</div>
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 class="mb-0">Form RKB
+          ${F.__serverLinked ? '<span class="badge text-bg-light border ms-2" title="Data berasal dari server">server</span>' : ''}
+          ${String(F.status||'draft').toLowerCase()==='draft'
+            ? `<span class="badge text-bg-secondary ms-1">${F.status_label || computeRevisionTag(F.nomor||'')}</span>`
+            : ''}
+        </h4>
+        <div class="small text-muted">${ESTATE_LABEL} · ${DIVISI_LABEL}</div>
+      </div>
 
       <div class="row g-3">
         <div class="col-sm-4">
@@ -393,32 +347,30 @@ function hydrateFromActualsIfNeeded(){
   function bind(){
     U.qs('#btn-periode').onclick = openPeriodeModal;
     U.qs('#btn-nomor').onclick = ()=>{
-      F.nomor = `RKB${DIVISI}${U.fmt.yymmddhhmmss(new Date())}`; saveBuffer(); build();
+      F.nomor = `RKB${DIVISI_ID}${U.fmt.yymmddhhmmss(new Date())}`;
+      saveBuffer(); build();
     };
 
-    // tombol new
-U.qs('#btn-new').onclick = ()=>{
-  if(confirm('Bersihkan form dan mulai RKB baru? Seluruh isian saat ini akan direset.')){
-    resetFormToNew();
-  }
-};
+    U.qs('#btn-new').onclick = ()=>{
+      if(confirm('Bersihkan form dan mulai RKB baru? Seluruh isian saat ini akan direset.')){
+        resetFormToNew();
+      }
+    };
 
     U.qs('#pekerjaan').oninput = (e)=>{
       CUR.pekerjaan = e.target.value;
-      const found = (M.activity||[]).find(a=> ((a.nama_pekerjaan||a.nama||'').toLowerCase() === CUR.pekerjaan.toLowerCase()));
+      const found = (M.activity||[]).find(a=> _str(a.nama_pekerjaan||a.nama).toLowerCase() === _str(CUR.pekerjaan).toLowerCase());
       CUR.activity_type = found?.activity_type || '';
       saveBufferThin(); updateHKLive();
     };
 
     U.qs('#btn-lokasi').onclick = openLokasiModal;
-
-    U.qs('#volume').oninput = (e)=>{ CUR.volume = parseFloat(e.target.value||0); saveBufferThin(); updateHKLive(); };
-    U.qs('#satuan').oninput = (e)=>{ CUR.satuan = e.target.value; saveBufferThin(); };
-    U.qs('#hkunit').oninput = (e)=>{ CUR.hk_unit = parseFloat(e.target.value||0); saveBufferThin(); updateHKLive(); };
+    U.qs('#volume').oninput = (e)=>{ CUR.volume = _num(e.target.value); saveBufferThin(); updateHKLive(); };
+    U.qs('#satuan').oninput = (e)=>{ CUR.satuan = _str(e.target.value); saveBufferThin(); };
+    U.qs('#hkunit').oninput = (e)=>{ CUR.hk_unit = _num(e.target.value); saveBufferThin(); updateHKLive(); };
     U.qs('#btn-hk').onclick = openHKModal;
 
-    U.qs('#pengawas').oninput = (e)=>{ CUR.pengawas = e.target.value; saveBufferThin(); };
-
+    U.qs('#pengawas').oninput = (e)=>{ CUR.pengawas = _str(e.target.value); saveBufferThin(); };
     U.qs('#btn-bahan-add').onclick = addBahan;
 
     U.qs('#btn-add-item').onclick = addItemFromForm;
@@ -470,9 +422,9 @@ U.qs('#btn-new').onclick = ()=>{
     };
 
     div.querySelector('#ok').onclick = ()=>{
-  F.periode = fPeriode(inp.value || ym(now));
-  saveBuffer(); build(); m.hide(); setTimeout(()=>div.remove(), 300);
-};
+      F.periode = fPeriode(inp.value || ym(now));
+      saveBuffer(); build(); m.hide(); setTimeout(()=>div.remove(), 300);
+    };
     div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
   }
 
@@ -511,8 +463,8 @@ U.qs('#btn-new').onclick = ()=>{
 
     function suggest(q, type){
       const src = type==='blok'? (M.blok||[]) : (M.komplek||[]);
-      const ql = q.toLowerCase();
-      return src.filter(x=> (x.kode||'').toLowerCase().includes(ql)).slice(0,10);
+      const ql = _str(q).toLowerCase();
+      return src.filter(x=> _str(x.kode).toLowerCase().includes(ql)).slice(0,10);
     }
 
     function addRow(r){ state.rows.push(r); renderRows(); }
@@ -542,9 +494,9 @@ U.qs('#btn-new').onclick = ()=>{
 
     div.querySelector('#lok-add').onclick = ()=>{
       const type = div.querySelector('#lok-type').value;
-      const name = input.value.trim(); if(!name) return;
+      const name = _str(input.value); if(!name) return;
       const src = type==='blok'? (M.blok||[]) : (M.komplek||[]);
-      const found = src.find(x=> (x.kode||'').toLowerCase() === name.toLowerCase());
+      const found = src.find(x=> _str(x.kode).toLowerCase() === name.toLowerCase());
       addRow({type, name, luas: parseFloat(found?.luas_ha||0)});
       input.value='';
     };
@@ -585,9 +537,9 @@ U.qs('#btn-new').onclick = ()=>{
     document.body.appendChild(div);
     const m = new bootstrap.Modal(div); m.show();
     div.querySelector('#ok').onclick = ()=>{
-      CUR.pct_bhl = parseFloat(div.querySelector('#p-bhl').value||0);
-      CUR.pct_sku = parseFloat(div.querySelector('#p-sku').value||0);
-      CUR.pct_bhb = parseFloat(div.querySelector('#p-bhb').value||0);
+      CUR.pct_bhl = _num(div.querySelector('#p-bhl').value);
+      CUR.pct_sku = _num(div.querySelector('#p-sku').value);
+      CUR.pct_bhb = _num(div.querySelector('#p-bhb').value);
       saveBufferThin(); build(); m.hide(); setTimeout(()=>div.remove(), 300);
     };
     div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
@@ -595,278 +547,105 @@ U.qs('#btn-new').onclick = ()=>{
 
   // ====== Bahan: autosuggest + auto-satuan dengan cache lokal ======
   function initAutoBahan(){
-  const namaEl = U.qs('#bahan-nama');
-  const satEl  = U.qs('#bahan-sat');
-  if(!namaEl || !satEl) return;
+    const namaEl = U.qs('#bahan-nama');
+    const satEl  = U.qs('#bahan-sat');
+    if(!namaEl || !satEl) return;
 
-  namaEl.addEventListener('input', ()=>{
-    const key = (namaEl.value||'').toLowerCase().trim();
-    if(!key) return;
+    namaEl.addEventListener('input', ()=>{
+      const key = _str(namaEl.value).toLowerCase();
+      if(!key){ namaEl.dataset.noMaterial=''; return; }
 
-    // 1) dari master (punya satuan_default & no_material)
-    const meta = getBahanMetaByName(key);
-    if(meta){
-      if(meta.satuan_default && !satEl.value){
-        satEl.value = meta.satuan_default;
+      const meta = getBahanMetaByName(key);
+      if(meta){
+        if(meta.satuan_default && !_str(satEl.value)){ satEl.value = meta.satuan_default; }
+        namaEl.dataset.noMaterial = meta.no_material || '';
+        return;
       }
-      // simpan sementara di element (data attribute), biar dipakai saat "Tambah"
-      namaEl.dataset.noMaterial = meta.no_material || '';
-      return;
-    }
-
-    // 2) fallback dari cache lokal bila satuan belum terisi
-    if(bahanUnitCache[key] && !satEl.value){
-      satEl.value = bahanUnitCache[key];
-    }
-
-    // jika tidak ada di master → kosongkan no_material sementara
-    namaEl.dataset.noMaterial = '';
-  });
-}
-
+      if(bahanUnitCache[key] && !_str(satEl.value)){
+        satEl.value = bahanUnitCache[key];
+      }
+      namaEl.dataset.noMaterial = '';
+    });
+  }
 
   function addBahan(){
-  const namaEl = U.qs('#bahan-nama');
-  const jmlEl  = U.qs('#bahan-jml');
-  const satEl  = U.qs('#bahan-sat');
+    const namaEl = U.qs('#bahan-nama');
+    const jmlEl  = U.qs('#bahan-jml');
+    const satEl  = U.qs('#bahan-sat');
 
-  const nama   = _str(namaEl.value);
-  const jumlah = _num(jmlEl.value);
-  let   satuan = _str(satEl.value);
+    const nama   = _str(namaEl.value);
+    const jumlah = _num(jmlEl.value);
+    let   satuan = _str(satEl.value);
 
-  if(!nama){ U.toast('Nama bahan wajib.','warning'); return; }
+    if(!nama){ U.toast('Nama bahan wajib.','warning'); return; }
 
-  // harus ada di master + punya no_material
-  const meta = findBahanInMaster(nama);
-  if(!meta){
-    U.toast(`Bahan "${nama}" tidak ditemukan di master atau belum mempunyai No Material.`, 'warning');
-    return;
+    const meta = findBahanInMaster(nama);
+    if(!meta){ U.toast(`Bahan "${nama}" tidak ditemukan di master atau tanpa No Material.`, 'warning'); return; }
+    if(!(jumlah>0)){ U.toast('Jumlah bahan harus > 0.', 'warning'); return; }
+    if(!satuan && meta.satuan_default){ satuan = meta.satuan_default; }
+    if(!satuan){ U.toast('Satuan bahan wajib diisi.', 'warning'); return; }
+
+    (CUR.bahan = Array.isArray(CUR.bahan)?CUR.bahan:[]).push({
+      nama, jumlah, satuan, no_material: meta.no_material
+    });
+
+    const key = nama.toLowerCase();
+    if(satuan && !bahanUnitCache[key]){ bahanUnitCache[key]=satuan; U.S.set(BAHAN_UNIT_KEY, bahanUnitCache); }
+
+    saveBufferThin(); renderBahan();
+    namaEl.value=''; jmlEl.value=''; satEl.value='';
+    delete namaEl.dataset.noMaterial;
   }
-  if(!_isPos(jumlah)){
-    U.toast('Jumlah bahan harus > 0.', 'warning'); return;
-  }
-
-  // isi satuan default bila kosong
-  if(!satuan && meta.satuan_default){ satuan = meta.satuan_default; }
-  if(!satuan){
-    U.toast('Satuan bahan wajib diisi.', 'warning'); return;
-  }
-
-  // final push
-  CUR.bahan.push({
-    nama,
-    jumlah,
-    satuan,
-    no_material: meta.no_material
-  });
-
-  // simpan cache satuan (agar auto isi di input selanjutnya)
-  const key = nama.toLowerCase();
-  if(satuan && !bahanUnitCache[key]){
-    bahanUnitCache[key] = satuan;
-    U.S.set(BAHAN_UNIT_KEY, bahanUnitCache);
-  }
-
-  saveBufferThin();
-  renderBahan();
-
-  // reset input
-  namaEl.value = '';
-  jmlEl.value = '';
-  satEl.value = '';
-}
-
-
 
   function renderBahan(){
     const list = U.qs('#bahan-list');
     const rows = (CUR.bahan||[]).map((b,i)=>`
-  <tr>
-    <td>${i+1}</td>
-    <td>${b.nama}</td>
-    <td>${b.no_material || '-'}</td>
-    <td>${b.jumlah}</td>
-    <td>${b.satuan||''}</td>
-    <td><button class="btn btn-sm btn-outline-danger" data-i="${i}">Hapus</button></td>
-  </tr>
-`).join('');
-list.innerHTML = `<table class="table table-sm">
-  <thead><tr><th>#</th><th>Nama</th><th>No. Material</th><th>Jumlah</th><th>Satuan</th><th></th></tr></thead>
-  <tbody>${rows}</tbody></table>`;
-    list.querySelectorAll('button[data-i]').forEach(btn=> btn.onclick = (e)=>{
-      const i = +e.currentTarget.dataset.i; CUR.bahan.splice(i,1); saveBufferThin(); renderBahan();
+      <tr>
+        <td>${i+1}</td>
+        <td>${_str(b.nama)}</td>
+        <td>${_str(b.no_material) || '-'}</td>
+        <td>${_num(b.jumlah)}</td>
+        <td>${_str(b.satuan)}</td>
+        <td><button class="btn btn-sm btn-outline-danger" data-i="${i}">Hapus</button></td>
+      </tr>
+    `).join('');
+    list.innerHTML = `<table class="table table-sm">
+      <thead><tr><th>#</th><th>Nama</th><th>No. Material</th><th>Jumlah</th><th>Satuan</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+    list.querySelectorAll('button[data-i]').forEach(btn=>{
+      btn.onclick = (e)=>{ const i=+e.currentTarget.dataset.i; CUR.bahan.splice(i,1); saveBufferThin(); renderBahan(); };
     });
   }
 
-  function createPdoDraftFromRkb(rkb){
-  const profile = SESSION.profile() || {};
-  const yrate = U.S.get('kpl.master.yrate', []);
-  const yact  = U.S.get('kpl.master.yactivity', []);
+  // ====== Items ======
+  function addItemFromForm(){
+    const errH = validateHeaderStrict(); if(errH){ U.toast(errH,'warning'); return; }
+    const errI = validateItemStrict(CUR); if(errI){ U.toast(errI,'warning'); return; }
+    const errB = validateBahanList(CUR.bahan||[]); if(errB){ U.toast(errB,'warning'); return; }
 
-  // helper: ambil rate dari yrate sesuai divisi user
-  function getRate(name){
-    const nm = String(name||'').toLowerCase();
-    const rows = (yrate||[]).filter(r => String((r.nama||r.key||'')).toLowerCase()===nm);
-    // prioritaskan yang match divisi_id
-    const hit = rows.find(r=> String(r.divisi||r.divisi_id||'').toUpperCase() === String(rkb.divisi_id||rkb.divisi||profile.divisi||'').toUpperCase()) || rows[0];
-    return Number(hit && (hit.nilai||hit.value||hit.rate||0))||0;
+    const item = JSON.parse(JSON.stringify(CUR));
+    item.hk = computeHK(item);
+    F.items.unshift(item);
+
+    CUR = defaultItem();
+    saveBuffer();
+    build();
   }
-
-  // helper: cari meta activity untuk fallback satuan/tarif borongan
-  function findActMeta(pekerjaan, activity_type){
-    const byName = (yact||[]).find(a=> String(a.nama||a.pekerjaan||'').toLowerCase() === String(pekerjaan||'').toLowerCase());
-    if(byName) return byName;
-    const byType = (yact||[]).find(a=> String(a.activity_type||'').toLowerCase() === String(activity_type||'').toLowerCase());
-    return byType || {};
-  }
-
-  // helper: timestamp WIB → tanda tangan digital
-  function sigWIB(d=new Date()){
-    const tz = "Asia/Jakarta";
-    const dd = new Intl.DateTimeFormat("id-ID",{timeZone:tz, day:"2-digit"}).format(d);
-    const mm = new Intl.DateTimeFormat("id-ID",{timeZone:tz, month:"2-digit"}).format(d);
-    const yy = new Intl.DateTimeFormat("id-ID",{timeZone:tz, year:"2-digit"}).format(d);
-    const hh = new Intl.DateTimeFormat("id-ID",{timeZone:tz, hour:"2-digit", hour12:false}).format(d);
-    const mi = new Intl.DateTimeFormat("id-ID",{timeZone:tz, minute:"2-digit"}).format(d);
-    const ss = new Intl.DateTimeFormat("id-ID",{timeZone:tz, second:"2-digit"}).format(d);
-    return `${dd}/${mm}/${yy}-${hh}:${mi}:${ss}`;
-  }
-
-  // Rates dari yrate (per divisi)
-  const upah_bhl = getRate('upah_hk_bhl');
-  const upah_sku = getRate('upah_hk_sku');
-  const premi_panen = getRate('premi_panen');         // kalau tidak ada, hasilnya 0
-  const premi_non   = getRate('premi_non_panen');     // kalau tidak ada, hasilnya 0
-
-  const hk = [];
-  const borongan = [];
-
-  (rkb.items||[]).forEach(it=>{
-    const pekerjaan = it.pekerjaan || it.nama || '';
-    const actMeta = findActMeta(pekerjaan, it.activity_type);
-    const satuanDefault = it.satuan_borongan || it.satuan || actMeta.satuan_borongan || actMeta.satuan_default || actMeta.satuan || '';
-
-    // ---- HK (SKU/BHL) ----
-    const hkSKU = Number(it.hk_sku || 0);
-    const hkBHL = Number(it.hk_bhl || 0);
-    const hkTotal = Number(it.hk_total || 0);
-    const luas = Number(it.luas_ha || it.luas || it.volume || 0);
-
-    if(hkSKU>0){ hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkSKU, tipe:'SKU', total_rp: Math.round(hkSKU * upah_sku) }); }
-    if(hkBHL>0){ hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkBHL, tipe:'BHL', total_rp: Math.round(hkBHL * upah_bhl) }); }
-    if(hkSKU===0 && hkBHL===0 && hkTotal>0){
-      // tidak ada rincian → asumsikan SKU
-      hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkTotal, tipe:'SKU', total_rp: Math.round(hkTotal * upah_sku) });
-    }
-
-    // ---- Borongan ----
-    // qty_borongan prioritas; jika tidak ada, gunakan volume * bhb_percent/100 (jika ada); jika tetap 0 → skip
-    const rateBor = Number(it.tarif_borongan || actMeta.tarif_borongan || 0);
-    const bhbPct  = Number(it.bhb_percent || it.persen_bhb || 0);
-    const vol     = Number(it.volume || luas || 0);
-    const qtyBor  = Number(it.qty_borongan || ((bhbPct>0) ? (vol * bhbPct / 100) : 0));
-
-    if(rateBor>0 && qtyBor>0){
-      borongan.push({
-        pekerjaan,
-        satuan: satuanDefault,
-        qty: qtyBor,
-        tarif_borongan: rateBor,
-        total_rp: Math.round(qtyBor * rateBor)
-      });
-    }
-  });
-
-  const pd = {
-    // nomor dikosongkan → akan dibuat otomatis saat membuka PDO Form
-    nomor: '',
-    ref_rkb: rkb.nomor || '',
-    periode: rkb.periode || '',
-    estate_id: rkb.estate_id || '',
-    rayon_id: rkb.rayon_id || '',
-    divisi_id: rkb.divisi_id || rkb.divisi || '',
-    // rates & premi dari yrate (sesuai divisi)
-    upah_hk_bhl: upah_bhl,
-    upah_hk_sku: upah_sku,
-    premi_panen: premi_panen,
-    premi_non_panen: premi_non,
-    // target produksi manual (biarkan 0)
-    target_produksi_ton: 0,
-    // detail
-    hk, borongan,
-    // tanda tangan / status
-    created_ts: sigWIB(),   // Asisten (tanggal buat dokumen)
-    askep_ts: null,         // akan diisi saat Askep approve
-    manager_ts: null,       // akan diisi saat Manager approve
-    status: 'draft'
-  };
-
-  // === NORMALISASI DIVISI (buang divisi_kode, pastikan divisi_id terisi) ===
-{
-  const divFix = String(
-    rkb.divisi_id || rkb.divisi || rkb.divisi_kode || (SESSION.profile()?.divisi) || ''
-  ).trim();
-  pd.divisi_id = divFix;         // pakai satu field baku
-  delete pd.divisi;              // bersihkan field lama jika ada (display-only tidak dibutuhkan di PDO draft)
-  delete pd.divisi_kode;         // sumber masalah: hapus bila terbawa
-}
-
-  // Simpan / update ke draft lokal
-  const arr = U.S.get('kpl.actual.pdo_draft', []);
-  const idx = arr.findIndex(x => String(x.ref_rkb||'') === String(pd.ref_rkb||''));
-  if(idx>=0) arr[idx] = pd; else arr.push(pd);
-  U.S.set('kpl.actual.pdo_draft', arr);
-
-  U.toast('Draft PDO otomatis terbentuk dari Draft RKB.');
-}
-
-
-  // ====== Items (daftar pekerjaan di RKB) ======
-  function validateHeader(){
-    if(!F.periode) return 'Periode wajib diisi.';
-    if(!F.nomor) return 'No RKB belum dibuat.';
-    return '';
-  }
-function validateItem(it){
-  return validateItemStrict(it); // delegasi ke validasi ketat
-}
-
-function addItemFromForm(){
-  // validasi header
-  const errH = validateHeaderStrict();
-  if(errH){ U.toast(errH,'warning'); return; }
-
-  // validasi item
-  const errI = validateItemStrict(CUR);
-  if(errI){ U.toast(errI,'warning'); return; }
-
-  // validasi daftar bahan (jika ada)
-  const errB = validateBahanList(CUR.bahan||[]);
-  if(errB){ U.toast(errB,'warning'); return; }
-
-  // lolos semua validasi → simpan
-  const item = JSON.parse(JSON.stringify(CUR));
-  item.hk = computeHK(item);
-  F.items.unshift(item);
-
-  // reset form item
-  CUR = defaultItem();
-  saveBuffer();
-  build();
-}
-
 
   function renderItems(){
     const el = U.qs('#items-table');
     const items = F.items||[];
-    if(!items.length){ el.innerHTML = `<div class="text-muted">Belum ada item. Tambahkan pekerjaan lalu klik "<em>Tambahkan ke Daftar Pekerjaan</em>".</div>`; return; }
+    if(!items.length){
+      el.innerHTML = `<div class="text-muted">Belum ada item. Tambahkan pekerjaan lalu klik "<em>Tambahkan ke Daftar Pekerjaan</em>".</div>`;
+      return;
+    }
     const rows = items.map((r,i)=>`
       <tr>
         <td>${i+1}</td>
-        <td>${r.pekerjaan}</td>
+        <td>${_str(r.pekerjaan)}</td>
         <td>${(r.lokasi||[]).map(x=>x.name).join(', ')}</td>
-        <td>${r.volume} ${r.satuan}</td>
-        <td>${r.hk?.total?.toFixed(2) || '-'}</td>
+        <td>${_num(r.volume)} ${_str(r.satuan)}</td>
+        <td>${(r.hk?.total ?? 0).toFixed(2)}</td>
         <td>
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-primary" data-a="edit" data-i="${i}">Edit</button>
@@ -884,7 +663,6 @@ function addItemFromForm(){
       btn.onclick = ()=>{
         if(a==='del'){ F.items.splice(i,1); saveBuffer(); renderItems(); }
         if(a==='edit'){
-          // Load item ke form atas
           CUR = JSON.parse(JSON.stringify(F.items[i]));
           F.items.splice(i,1);
           saveBuffer(); build();
@@ -893,76 +671,140 @@ function addItemFromForm(){
     });
   }
 
-// === Reset total form: buffer bersih, nomor kosong, item kosong, tanpa flag server
-function resetFormToNew(){
-  CUR = defaultItem();
-  F = {
-    divisi: DIVISI,
-    divisi_id: DIVISI_ID,
-    estate_id: ESTATE_ID,
-    rayon_id:  RAYON_ID,
-    estate_full: ESTATE,
-    periode: '',   // biarkan user pilih lagi
-    nomor: '',
-    items: [],
-    status: 'draft',
-    status_label: 'draft',
-    __serverLinked: false,
-    created_at: undefined,
-    updated_at: undefined
-  };
-  saveBufferThin();
-  build();
-}
+  // ====== Reset form baru ======
+  function resetFormToNew(){
+    CUR = defaultItem();
+    F = {
+      divisi: DIVISI_LABEL,
+      divisi_id: DIVISI_ID,
+      estate_id: ESTATE_ID,
+      rayon_id:  RAYON_ID,
+      estate_full: ESTATE_LABEL,
+      periode: '',
+      nomor: '',
+      items: [],
+      status: 'draft',
+      status_label: 'draft',
+      __serverLinked: false,
+      created_at: undefined,
+      updated_at: undefined
+    };
+    saveBufferThin(); build();
+  }
 
+  // ====== Simpan Draft ======
+  function saveDraft(){
+    const errH = validateHeaderStrict(); if(errH){ U.toast(errH,'warning'); return; }
+    if(!(F.items?.length)) { U.toast('Minimal 1 item pekerjaan.','warning'); return; }
 
-function saveDraft(){
-  const errH = validateHeader(); if(errH){ U.toast(errH,'warning'); return; }
-  if(!(F.items?.length)) { U.toast('Minimal 1 item pekerjaan.','warning'); return; }
+    const nowIso = new Date().toISOString();
+    const drafts = U.S.get('rkb.drafts', []) || [];
+    const totalHK = (F.items||[]).reduce((a,it)=> a + (computeHK(it).total||0), 0);
 
-  const nowIso = new Date().toISOString();
-  const drafts = U.S.get('rkb.drafts', []);
-  const totalHK = (F.items||[]).reduce((a,it)=> a + (computeHK(it).total||0), 0);
+    const item = {
+      ...F,
+      // label display
+      divisi: DIVISI_LABEL,
+      estate_full: ESTATE_LABEL,
+      // scope id dijamin
+      divisi_id: F.divisi_id || DIVISI_ID,
+      estate_id: F.estate_id || ESTATE_ID,
+      rayon_id:  F.rayon_id  || RAYON_ID,
+      periode: fPeriode(F.periode),
+      status: 'draft',
+      status_label: computeRevisionTag(F.nomor),
+      hk_total: Number(totalHK.toFixed(2)),
+      created_at: F.created_at || nowIso,
+      updated_at: nowIso,
+      __serverLinked: !!F.__serverLinked
+    };
 
-  const item = {
-    ...F,
+    const idx = drafts.findIndex(d=> _str(d.nomor)===_str(F.nomor));
+    if(idx>=0) drafts[idx]=item; else drafts.unshift(item);
+    U.S.set('rkb.drafts', drafts);
 
-    // label lama tetap sebagai display
-    divisi: DIVISI,
-    estate_full: ESTATE,
+    F = {...item};
+    saveBufferThin();
 
-    // === scope id dipastikan ikut tersimpan ===
-    divisi_id: F.divisi_id || DIVISI_ID,
-    estate_id: F.estate_id || ESTATE_ID,
-    rayon_id:  F.rayon_id  || RAYON_ID,
+    // (opsional) buat draft PDO dari RKB untuk downstream
+    try{ createPdoDraftFromRkb(F); }catch(_){}
 
-    periode: fPeriode(F.periode),
-    status: 'draft',
-    status_label: computeRevisionTag(F.nomor),
-    hk_total: Number(totalHK.toFixed(2)),
-    created_at: F.created_at || nowIso,
-    updated_at: nowIso,
+    U.toast('Draft RKB disimpan.','success');
+  }
 
-    // pertahankan tanda server jika memang berasal dari server
-    __serverLinked: !!F.__serverLinked
-  };
+  // ====== Create PDO Draft dari RKB (tetap disertakan seperti versi Anda) ======
+  function createPdoDraftFromRkb(rkb){
+    const yrate = U.S.get('kpl.master.yrate', []);
+    const yact  = U.S.get('kpl.master.yactivity', []);
+    function getRate(name){
+      const nm = _str(name).toLowerCase();
+      const rows = (yrate||[]).filter(r => _str(r.nama||r.key).toLowerCase()===nm);
+      const hit = rows.find(r=> _str(r.divisi||r.divisi_id).toUpperCase() === _str(rkb.divisi_id||rkb.divisi||profile.divisi).toUpperCase()) || rows[0];
+      return _num(hit && (hit.nilai||hit.value||hit.rate));
+    }
+    function findActMeta(pekerjaan, activity_type){
+      const byName = (yact||[]).find(a=> _str(a.nama||a.pekerjaan).toLowerCase() === _str(pekerjaan).toLowerCase());
+      if(byName) return byName;
+      const byType = (yact||[]).find(a=> _str(a.activity_type).toLowerCase() === _str(activity_type).toLowerCase());
+      return byType || {};
+    }
+    function sigWIB(d=new Date()){
+      const tz="Asia/Jakarta";
+      const dd=new Intl.DateTimeFormat("id-ID",{timeZone:tz,day:"2-digit"}).format(d);
+      const mm=new Intl.DateTimeFormat("id-ID",{timeZone:tz,month:"2-digit"}).format(d);
+      const yy=new Intl.DateTimeFormat("id-ID",{timeZone:tz,year:"2-digit"}).format(d).slice(-2);
+      const hh=new Intl.DateTimeFormat("id-ID",{timeZone:tz,hour:"2-digit",hour12:false}).format(d);
+      const mi=new Intl.DateTimeFormat("id-ID",{timeZone:tz,minute:"2-digit"}).format(d);
+      const ss=new Intl.DateTimeFormat("id-ID",{timeZone:tz,second:"2-digit"}).format(d);
+      return `${dd}/${mm}/${yy}-${hh}:${mi}:${ss}`;
+    }
+    const upah_bhl = getRate('upah_hk_bhl');
+    const upah_sku = getRate('upah_hk_sku');
+    const premi_panen = getRate('premi_panen');
+    const premi_non   = getRate('premi_non_panen');
 
-  const idx = drafts.findIndex(d=> d.nomor===F.nomor);
-  if(idx>=0) drafts[idx]=item; else drafts.unshift(item);
-  U.S.set('rkb.drafts', drafts);
+    const hk=[]; const borongan=[];
+    (rkb.items||[]).forEach(it=>{
+      const pekerjaan = it.pekerjaan || it.nama || '';
+      const actMeta = findActMeta(pekerjaan, it.activity_type);
+      const satuanDefault = it.satuan_borongan || it.satuan || actMeta.satuan_borongan || actMeta.satuan_default || actMeta.satuan || '';
+      const hkSKU=_num(it.hk_sku), hkBHL=_num(it.hk_bhl), hkTotal=_num(it.hk_total);
+      const luas=_num(it.luas_ha || it.luas || it.volume);
+      if(hkSKU>0){ hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkSKU, tipe:'SKU', total_rp: Math.round(hkSKU*upah_sku) }); }
+      if(hkBHL>0){ hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkBHL, tipe:'BHL', total_rp: Math.round(hkBHL*upah_bhl) }); }
+      if(hkSKU===0 && hkBHL===0 && hkTotal>0){ hk.push({ pekerjaan, satuan: satuanDefault, luas_ha: luas, hk: hkTotal, tipe:'SKU', total_rp: Math.round(hkTotal*upah_sku) }); }
 
-  // update buffer juga agar konsisten ketika kembali ke form
-  F = {...item};
-  saveBufferThin();
-  createPdoDraftFromRkb(F);
+      const rateBor=_num(it.tarif_borongan || actMeta.tarif_borongan);
+      const bhbPct=_num(it.bhb_percent || it.persen_bhb);
+      const vol=_num(it.volume || luas);
+      const qtyBor=_num(it.qty_borongan || ((bhbPct>0)?(vol*bhbPct/100):0));
+      if(rateBor>0 && qtyBor>0){
+        borongan.push({ pekerjaan, satuan: satuanDefault, qty: qtyBor, tarif_borongan: rateBor, total_rp: Math.round(qtyBor*rateBor) });
+      }
+    });
 
-  U.toast('Draft RKB disimpan.','success');
-}
+    const pd = {
+      nomor:'', ref_rkb: rkb.nomor || '', periode: rkb.periode || '',
+      estate_id: rkb.estate_id || '', rayon_id: rkb.rayon_id || '', divisi_id: rkb.divisi_id || rkb.divisi || '',
+      upah_hk_bhl: upah_bhl, upah_hk_sku: upah_sku, premi_panen, premi_non_panen: premi_non,
+      target_produksi_ton:0, hk, borongan,
+      created_ts: sigWIB(), askep_ts: null, manager_ts: null, status:'draft'
+    };
+    // normalisasi divisi_id
+    pd.divisi_id = _str(rkb.divisi_id || rkb.divisi || SESSION.profile()?.divisi);
+    delete pd.divisi; delete pd.divisi_kode;
 
-  // default periode ke bulan ini jika kosong
-if(!F.periode){
-  const d=new Date();
-  F.periode = fPeriode(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
-}
+    const arr = U.S.get('kpl.actual.pdo_draft', []) || [];
+    const idx = arr.findIndex(x => _str(x.ref_rkb) === _str(pd.ref_rkb));
+    if(idx>=0) arr[idx] = pd; else arr.push(pd);
+    U.S.set('kpl.actual.pdo_draft', arr);
+    U.toast('Draft PDO otomatis terbentuk dari Draft RKB.');
+  }
+
+  // ====== GO ======
+  if(!F.periode){
+    const d=new Date();
+    F.periode = fPeriode(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+  }
   build();
 };

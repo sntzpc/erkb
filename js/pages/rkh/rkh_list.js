@@ -224,28 +224,30 @@ const ICON = {
     : (U.S.get(draftKey,  [])||[]);
 
   data = (data||[]).map(r=>{
-    const h = r.header || {};
-    return {
-      nomor: h.nomor || '',
-      ref_rkb: h.ref_rkb || '',
-      tanggal: h.tanggal || '',
-      periode: fPeriode(h.periode || ''),
-      divisi: h.divisi || h.divisi_id || '',
-      divisi_id: h.divisi_id || '',
-      estate_full: h.estate_full || '',
-      estate_id: h.estate_id || '',
-      rayon_id: h.rayon_id || '',
-      status: h.status || 'created',
-      hk_total: sumHK(r.items||[]),
-      created_at: h.created_at || r.created_at || '',
-      updated_at: h.updated_at || r.updated_at || '',
-      last_error: r.last_error || '',
-      items: r.items || [],
-      bahan: r.bahan || [],
-      __serverLinked: !!h.__serverLinked,
-      _raw: r
-    };
-  });
+  const h = r.header || {};
+  const baseStatus = (which==='draft') ? (h.status || 'draft') : (h.status || 'created');
+  return {
+    nomor: h.nomor || '',
+    ref_rkb: h.ref_rkb || '',
+    tanggal: h.tanggal || '',
+    periode: fPeriode(h.periode || ''),
+    divisi: h.divisi || h.divisi_id || '',
+    divisi_id: h.divisi_id || '',
+    estate_full: h.estate_full || '',
+    estate_id: h.estate_id || '',
+    rayon_id: h.rayon_id || '',
+    status: baseStatus,
+    hk_total: sumHK(r.items||[]),
+    created_at: h.created_at || r.created_at || '',
+    updated_at: h.updated_at || r.updated_at || '',
+    last_error: r.last_error || '',
+    items: r.items || [],
+    bahan: r.bahan || [],
+    __serverLinked: !!h.__serverLinked,
+    _raw: r
+  };
+});
+
 
   // ===== Filtering / paging =====
   function sortData(arr){
@@ -354,59 +356,47 @@ const ICON = {
     'BHL','SKU','BHB','No. Material','Nama Bahan','Jumlah','Sat. Bahan','Nama Pengawas'
   ];
 
-  function flattenRkhRows(r){
-    const items = Array.isArray(r.items) ? r.items : [];
-    const bahan = Array.isArray(r.bahan) ? r.bahan : [];
-    const bahanByIdx = {};
-    bahan.forEach(b=>{
-      const k = String(b.item_idx||'');
-      (bahanByIdx[k] = bahanByIdx[k] || []).push({
-        no_material: String(b.no_material ?? b.kode ?? b.code ?? b.id ?? b.no ?? ''),
-        nama: b.nama || '',
-        jumlah: (b.jumlah!==undefined && b.jumlah!==null) ? b.jumlah : '',
-        satuan: b.satuan || ''
-      });
-    });
+  function flattenRkhRows(header, items, bahan){
+  const DETAIL_HEADERS = [
+    'Activity Type','Jenis Pekerjaan','Lokasi','Volume Kerja','Satuan','HK/Unit',
+    'BHL','SKU','BHB','No. Material','Nama Bahan','Jumlah','Sat. Bahan','Nama Pengawas'
+  ];
 
-    if(!items.length){
-      return [{
-        'Activity Type':'','Jenis Pekerjaan':'','Lokasi':'','Volume Kerja':'','Satuan':'','HK/Unit':'',
-        'BHL':'','SKU':'','BHB':'','No. Material':'','Nama Bahan':'','Jumlah':'','Sat. Bahan':'','Nama Pengawas':''
-      }];
-    }
+  const its  = normalizeItemsForExport(items);
+  const bhn  = normalizeBahanForExport(bahan);
+  const byIdx = {};
+  (bhn||[]).forEach(b=>{
+    const k = String(_num(b.item_idx));
+    (byIdx[k] = byIdx[k] || []).push(b);
+  });
 
-    const MATERIAL_SEP = '\n';
-    const rows = items.map((it, index)=>{
-      const hk = computeHK(it);
-      const bs = bahanByIdx[String(it.idx || (index+1))] || [];
-      const noMat   = bs.map(b=>b.no_material).filter(Boolean).join(MATERIAL_SEP);
-      const namaBhn = bs.map(b=>b.nama).filter(Boolean).join(MATERIAL_SEP);
-      const jumlahB = bs.map(b=> (b.jumlah!=='' && b.jumlah!==null && b.jumlah!==undefined) ? String(b.jumlah) : '').filter(Boolean).join(MATERIAL_SEP);
-      const satuanB = bs.map(b=>b.satuan).filter(Boolean).join(MATERIAL_SEP);
+  const sep = '\n';
+  const rows = (its.length?its:[{
+    activity_type:'', pekerjaan:'', lokasi:'', volume:0, satuan:'',
+    hk_unit:0, hk_bhl:0, hk_sku:0, hk_bhb:0, pengawas:'', idx:1
+  }]).map(it=>{
+    const listB = byIdx[String(_num(it.idx))] || [];
+    return {
+      'Activity Type'  : it.activity_type || '',
+      'Jenis Pekerjaan': it.pekerjaan || '',
+      'Lokasi'         : it.lokasi || '',
+      'Volume Kerja'   : Number(it.volume||0),
+      'Satuan'         : it.satuan || '',
+      'HK/Unit'        : Number(it.hk_unit||0),
+      'BHL'            : Number(it.hk_bhl||0),
+      'SKU'            : Number(it.hk_sku||0),
+      'BHB'            : Number(it.hk_bhb||0),
+      'No. Material'   : listB.map(b=>b.no_material).filter(Boolean).join(sep),
+      'Nama Bahan'     : listB.map(b=>b.nama).filter(Boolean).join(sep),
+      'Jumlah'         : listB.map(b=> (b.jumlah===0||b.jumlah)?String(b.jumlah):'').filter(Boolean).join(sep),
+      'Sat. Bahan'     : listB.map(b=>b.satuan).filter(Boolean).join(sep),
+      'Nama Pengawas'  : it.pengawas || ''
+    };
+  });
 
-      return {
-        'Activity Type'  : it.activity_type || it.activity || '',
-        'Jenis Pekerjaan': it.pekerjaan || '',
-        'Lokasi'         : it.lokasi || '',
-        'Volume Kerja'   : Number(it.volume||0),
-        'Satuan'         : it.satuan || '',
-        'HK/Unit'        : Number(it.hk_unit||0),
-        'BHL'            : Number(hk.BHL || 0),
-        'SKU'            : Number(hk.SKU || 0),
-        'BHB'            : Number(hk.BHB || 0),
-        'No. Material'   : noMat,
-        'Nama Bahan'     : namaBhn,
-        'Jumlah'         : jumlahB,
-        'Sat. Bahan'     : satuanB,
-        'Nama Pengawas'  : it.pengawas || ''
-      };
-    });
+  return {DETAIL_HEADERS, rows};
+}
 
-    return rows.length ? rows : [{
-      'Activity Type':'','Jenis Pekerjaan':'','Lokasi':'','Volume Kerja':'','Satuan':'','HK/Unit':'',
-      'BHL':'','SKU':'','BHB':'','No. Material':'','Nama Bahan':'','Jumlah':'','Sat. Bahan':'','Nama Pengawas':''
-    }];
-  }
 
   // ===== Styles kecil (pager dll) =====
   (function ensureStyles(){
@@ -469,6 +459,7 @@ const ICON = {
                 <th>Tanggal</th>
                 <th>Periode</th>
                 <th>Divisi</th>
+                ${which==='draft' ? '<th>Ref. No RKB</th>' : ''}
                 <th>HK (Total)</th>
                 <th>Status</th>
                 ${which==='outbox' ? '<th class="hide-sm">Keterangan Error</th>' : ''}
@@ -506,44 +497,50 @@ const ICON = {
     const tb = U.qs('#rows');
 
     if(!slice.length){
-      tb.innerHTML = `<tr><td colspan="${which==='outbox'?9:8}" class="text-center text-muted">Tidak ada data.</td></tr>`;
-      U.qs('#info').textContent = `0 dari ${arr.length} RKH`;
-      return;
+    const baseCols = 8; // No, Nomor, Tanggal, Periode, Divisi, HK, Status, Aksi
+    const plusDraft = (which==='draft') ? 1 : 0;     // Ref. No RKB
+    const plusOutbx = (which==='outbox') ? 1 : 0;    // Keterangan Error
+    const COLS = baseCols + plusDraft + plusOutbx;
+
+    tb.innerHTML = `<tr><td colspan="${COLS}" class="text-center text-muted">Tidak ada data.</td></tr>`;
+    U.qs('#info').textContent = `0 dari ${arr.length} RKH`;
+    return;
     }
 
+
     tb.innerHTML = slice.map((r,idx)=>{
-      const i = (page-1)*pageSize + idx;
-      const hkStr = fmtN(r.hk_total);
-      const btn = (name, title, action, enabled=true)=>{
-  const dis = enabled ? '' : 'disabled';
-  return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-nomor="${r.nomor}" data-i="${i}" ${dis}>
-            <span class="i i-${name}">${ICON[name]}</span>
-          </button>`;
-};
-      const badgeCls = String(r.status).toLowerCase()==='created' ? 'text-bg-success' : 'text-bg-secondary';
-      return `<tr>
+    const i = (page-1)*pageSize + idx;
+    const hkStr = fmtN(r.hk_total);
+    const btn = (name, title, action, enabled=true)=>{
+        const dis = enabled ? '' : 'disabled';
+        return `<button class="btn btn-outline-secondary icon-btn" title="${title}" data-a="${action}" data-i="${i}" ${dis}>
+                <span class="i i-${name}">${ICON[name]}</span>
+                </button>`;
+    };
+    const isCreated = String(r.status).toLowerCase()==='created';
+
+    return `<tr>
         <td>${i+1}</td>
         <td>${r.nomor||'-'}</td>
         <td>${fmtDateWIB_ddMMyyyy(r.tanggal)||'-'}</td>
         <td>${fPeriode(r.periode)||'-'}</td>
         <td>${r.divisi||'-'}</td>
+        ${which==='draft' ? `<td>${r.ref_rkb || '-'}</td>` : ''}
         <td>${hkStr}</td>
-        <td><span class="badge ${badgeCls}">${r.status||'-'}</span></td>
+        <td><span class="badge ${isCreated?'text-bg-success':'text-bg-secondary'}">${r.status||'-'}</span></td>
         ${which==='outbox' ? `<td class="hide-sm">${r.last_error||''}</td>` : ''}
         <td>
-    <div class="btn-group btn-group-sm">
-      ${btn('view','Lihat (detail)','view', true)}
-      ${which==='draft' ? btn('edit','Edit','edit', true) : ''}
-      ${which==='draft' ? btn('del','Hapus','del', !r.__serverLinked) : ''}
-      ${which==='draft'
-        ? btn('sync','Kirim/Sync ke server','sync', true)
-        : btn('resend','Kirim Ulang','resend', true)
-      }
-      ${btn('open','Buka di Form','open', true)}
-    </div>
-  </td>
-      </tr>`;
+        <div class="btn-group btn-group-sm">
+            ${btn('view','Lihat (detail)','view', true)}
+            ${which==='draft' ? btn('edit','Edit','edit', !isCreated) : ''}
+            ${which==='draft' ? btn('del','Hapus','del', !isCreated && !r.__serverLinked) : ''}
+            ${which==='draft' ? btn('sync','Kirim/Sync ke server','sync', !isCreated) : btn('resend','Kirim Ulang','resend', true)}
+            ${btn('open','Buka di Form','open', true)}
+        </div>
+        </td>
+    </tr>`;
     }).join('');
+
 
     tb.querySelectorAll('button').forEach(btn=>{
       const i = +btn.dataset.i; const a = btn.dataset.a;
@@ -584,33 +581,86 @@ const ICON = {
     ul.appendChild(li('»', Math.min(pc,page+1), page>=pc));
   }
 
+  // === [PATCH E1] Converter: rkh.drafts row (_raw) -> rkh.form.buffer (flat yang dipakai form)
+function _lokasiToArray(lok) {
+  if (Array.isArray(lok)) return lok;                    // sudah format form
+  const s = String(lok || '').trim();
+  if (!s) return [];
+  return s.split(',').map(x => x.trim()).filter(Boolean).map(name => ({ type:'', name, luas: undefined }));
+}
+function _num(n){ const v = Number(n); return Number.isFinite(v) ? v : 0; }
+
+function draftToFormBuffer(rawDraft){
+  const h = (rawDraft && rawDraft.header) || {};
+  const items = (rawDraft.items || []).map((it, idx) => {
+    const out = {
+      pekerjaan: it.pekerjaan || '',
+      activity_type: it.activity_type || it.activity || '',
+      lokasi: _lokasiToArray(it.lokasi),       // aman utk array/string
+      volume: _num(it.volume),
+      satuan: String(it.satuan || ''),
+      hk_unit: _num(it.hk_unit),
+      pct_bhl: _num(it.pct_bhl),
+      pct_sku: _num(it.pct_sku),
+      pct_bhb: _num(it.pct_bhb),
+      pengawas: String(it.pengawas || ''),
+      bahan: Array.isArray(it.bahan) ? it.bahan.map(b => ({
+        nama: String(b.nama || ''),
+        no_material: String(b.no_material || b.kode || b.code || b.id || b.no || ''),
+        jumlah: _num(b.jumlah),
+        satuan: String(b.satuan || '')
+      })) : []
+    };
+    // pastikan ada hk & idx untuk korelasi bahan
+    out.hk  = computeHK(out);
+    out.idx = _num(it.idx) || (idx+1);
+    return out;
+  });
+
+  const F = {
+    nomor:        String(h.nomor || ''),
+    tanggal:      String(h.tanggal || ''),
+    periode:      String(h.periode || ''),
+    ref_rkb:      String(h.ref_rkb || ''),
+    divisi:       String(h.divisi || h.divisi_id || ''),
+    estate_full:  String(h.estate_full || ''),
+    divisi_id:    String(h.divisi_id || ''),
+    estate_id:    String(h.estate_id || ''),
+    rayon_id:     String(h.rayon_id || ''),
+    items
+  };
+  F.__serverLinked = !!h.__serverLinked;
+  F.__fromListEdit = true;
+  return F;
+}
+
+
   // ====== Actions ======
   async function handleAction(a, i){
     const arr = applyFilter();
     const row = arr[i];
     if(!row) return;
 
-    if(a==='open'){
-      // kirim buffer ke form
-      const d = row._raw || {};
-      const h = d.header || {};
-      const hdr = {...h};
-      hdr.__serverLinked = String(hdr.status||'').toLowerCase()==='created';
-      d.header = hdr;
-      U.S.set('rkh.form.buffer', d);
-      location.hash = '#/rkh/form';
-      return;
+    if (a === 'open') {
+    // buka di Form dengan buffer flat yang lengkap (no_rkh, tgl, periode, ref_rkb ikut terbawa)
+    const fb = draftToFormBuffer(row._raw || {});
+    U.S.set('rkh.form.buffer', fb);
+    location.hash = '#/rkh/form';
+    return;
     }
 
-    if(a==='view'){
-      openViewModal(row._raw);
-      return;
+    if (a === 'view') {
+    openViewModal(row._raw);
+    return;
     }
 
-    if(a==='edit'){
-      U.S.set('rkh.form.buffer', row._raw);
-      location.hash = '#/rkh/form';
-      return;
+    if (a === 'edit') {
+    // EDIT = sama seperti open, tapi niatnya mengedit draft yg SAMA NOMORnya
+    // → ketika user "Simpan Draft" di form, logic saveDraft akan overwrite karena nomor sama.
+    const fb = draftToFormBuffer(row._raw || {});
+    U.S.set('rkh.form.buffer', fb);
+    location.hash = '#/rkh/form';
+    return;
     }
 
     if(a==='del' && which==='draft'){
@@ -636,39 +686,102 @@ const ICON = {
     }
 
     if(a==='sync' && which==='draft'){
-      try{
-        U.progressOpen('Kirim RKH...'); U.progress(35,'Push');
-        const d = row._raw || {};
-        const r = await API.call('pushRKH', {
-          row:  d.header || {},
-          items:(d.items || []).map((it,idx)=>({
-            idx: it.idx || (idx+1),
-            pekerjaan: it.pekerjaan, activity_type: it.activity_type,
-            lokasi: (it.lokasi||''),
-            volume: Number(it.volume||0), satuan: it.satuan||'',
-            hk_unit: Number(it.hk_unit||0),
-            pct_bhl: Number(it.pct_bhl||0),
-            pct_sku: Number(it.pct_sku||0),
-            pct_bhb: Number(it.pct_bhb||0),
-            pengawas: it.pengawas||''
-          })),
-          bahan:(d.bahan || []).map(b=>({
-            item_idx: Number(b.item_idx||0),
-            no_material: String(b.no_material ?? b.kode ?? b.code ?? b.id ?? b.no ?? ''),
-            nama: b.nama || '',
+  try{
+    U.progressOpen('Kirim RKH...'); U.progress(35,'Push');
+
+    // Ambil draft asli dari storage berdasarkan index i di hasil filter
+    const all = U.S.get(draftKey, []) || [];
+    // cari berdasarkan nomor + tanggal agar lebih aman
+    const idxLocal = all.findIndex(x => 
+      String(x?.header?.nomor||'') === String(row.nomor||'') &&
+      String(x?.header?.tanggal||'') === String(row.tanggal||'')
+    );
+    const raw = (idxLocal>=0 ? all[idxLocal] : row._raw) || {};
+    const h   = raw.header || {};
+    let items = Array.isArray(raw.items) ? raw.items : [];
+    let bahan = Array.isArray(raw.bahan) ? raw.bahan : [];
+
+    // Lokasi di form adalah array objek -> untuk server: join jadi string
+    const lokasiToString = (lok)=> {
+      if(Array.isArray(lok)) return lok.map(x=>x?.name||x).filter(Boolean).join(', ');
+      return String(lok||'');
+    };
+
+    // Jika bahan belum ada (kosong), flatten dari items.bahan
+    if(!bahan.length){
+      (items||[]).forEach((it, idxIt)=>{
+        (it.bahan||[]).forEach(b=>{
+          bahan.push({
+            item_idx: idxIt+1,
+            no_material: String(b.no_material || b.kode || b.code || b.id || b.no || ''),
+            nama: String(b.nama||''),
             jumlah: Number(b.jumlah||0),
-            satuan: b.satuan || ''
-          }))
+            satuan: String(b.satuan||'')
+          });
         });
-        if(!r.ok) throw new Error(r.error||'Gagal push');
-        U.toast('Terkirim.','success');
-      }catch(e){
-        U.toast(e.message||e,'danger');
-      }finally{
-        U.progressClose(); U.progressHardClose();
-      }
-      return;
+      });
     }
+
+    const req = {
+      row:  h,
+      items: (items||[]).map((it, idxIt)=>({
+        idx: it.idx || (idxIt+1),
+        pekerjaan: it.pekerjaan||'',
+        activity_type: it.activity_type||'',
+        lokasi: lokasiToString(it.lokasi),
+        volume: Number(it.volume||0),
+        satuan: it.satuan||'',
+        hk_unit: Number(it.hk_unit||0),
+        pct_bhl: Number(it.pct_bhl||0),
+        pct_sku: Number(it.pct_sku||0),
+        pct_bhb: Number(it.pct_bhb||0),
+        pengawas: it.pengawas||''
+      })),
+      bahan: (bahan||[]).map(b=>({
+        item_idx: Number(b.item_idx||0),
+        no_material: String(b.no_material || b.kode || b.code || b.id || b.no || ''),
+        nama: b.nama || '',
+        jumlah: Number(b.jumlah||0),
+        satuan: b.satuan || ''
+      }))
+    };
+
+    const resp = await API.call('pushRKH', req);
+    if(!resp?.ok) throw new Error(resp?.error || 'Gagal push');
+
+    // Update local draft → status created & __serverLinked = true
+    if(idxLocal>=0){
+      all[idxLocal].header.status = 'created';
+      all[idxLocal].header.__serverLinked = true;
+      all[idxLocal].header.updated_at = new Date().toISOString();
+      // opsional: simpan nomor balik server jika diberikan
+      if(resp.nomor){ all[idxLocal].header.nomor = resp.nomor; }
+      U.S.set(draftKey, all);
+    }
+
+    // refresh data list (ambil ulang dari local storage)
+    data = (U.S.get(draftKey,  [])||[]).map(r=>{
+      const h=r.header||{};
+      return {
+        nomor:h.nomor||'', ref_rkb:h.ref_rkb||'', tanggal:h.tanggal||'',
+        periode:fPeriode(h.periode||''), divisi:h.divisi||h.divisi_id||'',
+        divisi_id:h.divisi_id||'', estate_full:h.estate_full||'', estate_id:h.estate_id||'',
+        rayon_id:h.rayon_id||'',
+        status:h.status||'draft',
+        hk_total:sumHK(r.items||[]), updated_at:h.updated_at||r.updated_at||'',
+        last_error:'', items:r.items||[], bahan:r.bahan||[], __serverLinked:!!h.__serverLinked, _raw:r
+      };
+    });
+    renderRows(); renderPager();
+
+    U.toast('RKH tersinkron ke server. Status berubah menjadi CREATED.','success');
+  }catch(e){
+    U.toast(e.message||e,'danger');
+  }finally{
+    U.progressClose(); U.progressHardClose();
+  }
+  return;
+}
 
     if(a==='resend' && which==='outbox'){
       try{
@@ -708,76 +821,192 @@ const ICON = {
   }
 
   // ===== View Modal =====
-  function openViewModal(raw){
-    const h = (raw && raw.header) || {};
-    const it = (raw && raw.items) || [];
-    const bh = (raw && raw.bahan) || [];
-    const div = document.createElement('div');
-    div.className='modal fade'; div.innerHTML=`
-      <div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+function openViewModal(raw){
+  const h  = (raw && raw.header) || {};
+  const it = Array.isArray(raw?.items) ? raw.items : [];
+  const bh = Array.isArray(raw?.bahan) ? raw.bahan : [];
+
+  // Helper: 0 → "-" , angka ≠0 → 2 desimal (id-ID)
+  function fmtDash(n){
+    const v = Number(n);
+    if(!isFinite(v) || Math.abs(v) < 1e-12) return '-';
+    return new Intl.NumberFormat('id-ID',{
+      minimumFractionDigits:2, maximumFractionDigits:2
+    }).format(v);
+  }
+
+  // Normalisasi
+  const itemsNorm = normalizeItemsForExport(it);
+  const bahanNorm = normalizeBahanForExport(bh);
+
+  // Kelompokkan bahan per item_idx
+  const bahanByIdx = {};
+  (bahanNorm||[]).forEach(b=>{
+    const k = String(Number(b.item_idx||0));
+    (bahanByIdx[k] = bahanByIdx[k] || []).push(b);
+  });
+
+  const div = document.createElement('div');
+  div.className='modal fade';
+  div.innerHTML = `
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
         <div class="modal-header">
           <h5 class="modal-title">Detail RKH · ${h.nomor||'-'}</h5>
           <button class="btn-close" data-bs-dismiss="modal"></button>
         </div>
+
         <div class="modal-body">
+          <style>
+            .t-right{ text-align:right; }
+            .muted  { color:#666; }
+            .toggle-bhn.btn{ 
+                --bs-btn-padding-y: .15rem; 
+                --bs-btn-padding-x: .45rem; 
+                --bs-btn-font-size: .8rem;
+                line-height:1;
+                width: 28px;
+                text-align:center;
+            }
+            /* toggle bahan */
+            tr.bhn-row{ display:none; }
+            tr.bhn-row.open{ display:table-row; }
+            tr.bhn-row td{
+                background: #f9fafb;
+                border-top: 0;
+            }
+            .table-bahan{ width:100%; border-collapse:collapse; }
+            .table-bahan th, .table-bahan td{ border:1px solid #dee2e6; padding:6px; font-size:.9rem; }
+            .table-bahan th{ background:#f3f4f6; }
+          </style>
+
           <div class="small text-muted mb-2">
-            Tanggal: <b>${h.tanggal||'-'}</b> · Periode: <b>${fPeriode(h.periode)||'-'}</b><br/>
+            Tanggal: <b>${fmtDateWIB_ddMMyyyy(h.tanggal)||'-'}</b> · Periode: <b>${fPeriode(h.periode)||'-'}</b><br/>
             No RKH: <b>${h.nomor||'-'}</b> · Ref. RKB: <b>${h.ref_rkb||'-'}</b><br/>
             Estate: <b>${h.estate_full||'-'}</b> · Divisi: <b>${h.divisi||h.divisi_id||'-'}</b>
           </div>
 
           <h6>Daftar Pekerjaan</h6>
-          <div class="table-responsive mb-3">
-            <table class="table table-sm table-striped">
-              <thead><tr>
-                <th>#</th><th>Jenis Pekerjaan</th><th>Activity</th><th>Lokasi</th>
-                <th class="t-right">Vol</th><th>Sat</th><th class="t-right">HK/Unit</th>
-                <th class="t-right">%BHL</th><th class="t-right">%SKU</th><th class="t-right">%BHB</th>
-                <th class="t-right">HK Total</th><th>Pengawas</th>
-              </tr></thead>
+          <div class="table-responsive mb-1">
+            <table class="table table-sm table-striped align-middle">
+              <thead>
+                <tr>
+                  <th style="width:62px">#</th>
+                  <th>Jenis Pekerjaan</th>
+                  <th>Activity</th>
+                  <th>Lokasi</th>
+                  <th class="t-right">Vol</th>
+                  <th>Sat</th>
+                  <th class="t-right">HK/Unit</th>
+                  <th class="t-right">%BHL</th>
+                  <th class="t-right">%SKU</th>
+                  <th class="t-right">%BHB</th>
+                  <th class="t-right">HK Total</th>
+                  <th>Pengawas</th>
+                </tr>
+              </thead>
               <tbody>
-                ${it.map((r,i)=>{
-                  const hk = computeHK(r);
-                  return `<tr>
-                    <td>${i+1}</td>
+                ${itemsNorm.map((r,i)=>{
+                  const idx = Number(r.idx||i+1);
+                  const hkTot = (Number(r.hk_total)||0) || computeHK(r).total;
+                  const idxKey = String(idx);
+                  const listBhn = bahanByIdx[idxKey] || [];
+                  const hasBhn = listBhn.length > 0;
+
+                  const mainRow = `
+                  <tr>
+                    <td>
+                      <div class="d-flex align-items-center gap-1">
+                        <button type="button" class="btn btn-outline-secondary toggle-bhn" 
+                                data-idx="${idx}" aria-expanded="false" title="${hasBhn ? 'Lihat bahan' : 'Tidak ada bahan'}"
+                                ${hasBhn ? '' : 'disabled'}>
+                          +
+                        </button>
+                        <span>${i+1}</span>
+                      </div>
+                    </td>
                     <td>${r.pekerjaan||''}</td>
                     <td>${r.activity_type||''}</td>
                     <td>${r.lokasi||''}</td>
-                    <td class="t-right">${fmtN(r.volume||0)}</td>
+                    <td class="t-right">${fmtDash(r.volume)}</td>
                     <td>${r.satuan||''}</td>
-                    <td class="t-right">${fmtN(r.hk_unit||0)}</td>
-                    <td class="t-right">${fmtN(r.pct_bhl||0)}</td>
-                    <td class="t-right">${fmtN(r.pct_sku||0)}</td>
-                    <td class="t-right">${fmtN(r.pct_bhb||0)}</td>
-                    <td class="t-right">${fmtN(hk.total)}</td>
+                    <td class="t-right">${fmtDash(r.hk_unit)}</td>
+                    <td class="t-right">${fmtDash(r.pct_bhl)}</td>
+                    <td class="t-right">${fmtDash(r.pct_sku)}</td>
+                    <td class="t-right">${fmtDash(r.pct_bhb)}</td>
+                    <td class="t-right">${fmtDash(hkTot)}</td>
                     <td>${r.pengawas||''}</td>
                   </tr>`;
+
+                  const bahanTable = hasBhn ? `
+                    <table class="table-bahan">
+                      <thead>
+                        <tr>
+                          <th style="width:50px">No</th>
+                          <th style="width:140px">No. Material</th>
+                          <th>Nama Bahan</th>
+                          <th style="width:120px" class="t-right">Jumlah</th>
+                          <th style="width:90px">Satuan</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${listBhn.map((b,ii)=>`
+                          <tr>
+                            <td>${ii+1}</td>
+                            <td>${b.no_material||''}</td>
+                            <td>${b.nama||''}</td>
+                            <td class="t-right">${fmtDash(b.jumlah)}</td>
+                            <td>${b.satuan||''}</td>
+                          </tr>
+                        `).join('')}
+                      </tbody>
+                    </table>
+                  ` : `<div class="muted">Tidak ada bahan untuk item ini.</div>`;
+
+                  const detailRow = `
+                    <tr class="bhn-row" data-idx="${idx}">
+                      <td colspan="12">
+                        ${bahanTable}
+                      </td>
+                    </tr>`;
+
+                  return mainRow + detailRow;
                 }).join('')}
               </tbody>
             </table>
           </div>
 
-          <h6>Bahan</h6>
-          <div class="table-responsive">
-            <table class="table table-sm table-striped">
-              <thead><tr><th>#</th><th>item_idx</th><th>No. Material</th><th>Nama</th><th class="t-right">Jumlah</th><th>Sat</th></tr></thead>
-              <tbody>
-                ${(bh||[]).map((b,i)=>`<tr>
-                  <td>${i+1}</td><td>${b.item_idx||''}</td><td>${b.no_material||''}</td>
-                  <td>${b.nama||''}</td><td class="t-right">${fmtN(b.jumlah||0)}</td><td>${b.satuan||''}</td>
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
+          <div class="muted small">Klik tombol <b>+</b> di samping nomor untuk melihat/menyembunyikan bahan.</div>
         </div>
+
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
         </div>
-      </div></div>`;
-    document.body.appendChild(div);
-    const m=new bootstrap.Modal(div); m.show();
-    div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
-  }
+      </div>
+    </div>
+  `;
+  document.body.appendChild(div);
+
+  // Interaksi expand/collapse
+  div.addEventListener('click', (ev)=>{
+    const btn = ev.target.closest('.toggle-bhn');
+    if(!btn) return;
+    const idx = btn.getAttribute('data-idx');
+    const row = div.querySelector(`tr.bhn-row[data-idx="${idx}"]`);
+    if(!row) return;
+
+    const isOpen = row.classList.toggle('open'); // true = dibuka, false = ditutup
+    btn.textContent = isOpen ? '−' : '+';
+    btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    btn.title = isOpen ? 'Sembunyikan bahan' : 'Lihat bahan';
+  });
+
+  const m = new bootstrap.Modal(div);
+  m.show();
+  div.addEventListener('hidden.bs.modal', ()=> div.remove(), {once:true});
+}
+
+
 
   // === PATCH D: Resolver actuals & inflater detail RKH (letakkan di bawah ACTIONS atau sebelum export/print) ===
 let RKH_ACT_KEYS = { header:'rkh', items:'rkh_items', bahan:'rkh_bahan' };
@@ -862,6 +1091,43 @@ function flattenRkhRows(header, items, bahan){
 }
 
 
+function lokasiToString(lok){
+  if (Array.isArray(lok)) return lok.map(x => (x && (x.name||x)) ).filter(Boolean).join(', ');
+  return String(lok||'');
+}
+function normalizeItemsForExport(items){
+  return (Array.isArray(items)?items:[]).map((it, idx) => {
+    const vol = _num(it.volume);
+    const hkU = _num(it.hk_unit);
+    const pB  = _num(it.pct_bhl);
+    const pS  = _num(it.pct_sku);
+    const pH  = _num(it.pct_bhb);
+    const hk  = computeHK({volume:vol, hk_unit:hkU, pct_bhl:pB, pct_sku:pS, pct_bhb:pH});
+    return {
+      idx: _num(it.idx) || (idx+1),
+      pekerjaan: it.pekerjaan || '',
+      activity_type: it.activity_type || it.activity || '',
+      lokasi: lokasiToString(it.lokasi),
+      volume: vol,
+      satuan: String(it.satuan||''),
+      hk_unit: hkU,
+      pct_bhl: pB, pct_sku: pS, pct_bhb: pH,
+      hk_bhl: hk.BHL, hk_sku: hk.SKU, hk_bhb: hk.BHB, hk_total: hk.total,
+      pengawas: String(it.pengawas||'')
+    };
+  });
+}
+function normalizeBahanForExport(bahan){
+  return (Array.isArray(bahan)?bahan:[]).map(b => ({
+    item_idx: _num(b.item_idx) || _num(b.idx) || 0,
+    no_material: String(b.no_material || b.kode || b.code || b.id || b.no || ''),
+    nama: String(b.nama || ''),
+    jumlah: _num(b.jumlah),
+    satuan: String(b.satuan || '')
+  }));
+}
+
+
   // ===== Export Excel (one sheet per RKH) =====
   function colLetter(n){
     let s=''; n = n + 1;
@@ -876,17 +1142,22 @@ function flattenRkhRows(header, items, bahan){
   for (let idx=0; idx<arr.length; idx++){
   const r = arr[idx];
   let items = (r._raw?.items)||[];
-  let bahan = (r._raw?.bahan)||[];
+let bahan = (r._raw?.bahan)||[];
 
-  if(!(items && items.length)){
-    const det = await detailFromActuals(r.nomor);
-    items = det.items; bahan = det.bahan;
-  } else if(!(bahan && bahan.length)){
-    const det = await detailFromActuals(r.nomor);
-    if(det.bahan && det.bahan.length) bahan = det.bahan;
-  }
+// Inflate bila kosong dari actual STORE
+if(!(items && items.length)){
+  const det = await detailFromActuals(r.nomor);
+  items = det.items; bahan = det.bahan;
+}else if(!(bahan && bahan.length)){
+  const det = await detailFromActuals(r.nomor);
+  if(det.bahan && det.bahan.length) bahan = det.bahan;
+}
 
-  const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
+// <<< NORMALISASI ketika source berasal dari form (lokasi array, idx kosong, hk_* belum ada)
+items = normalizeItemsForExport(items);
+bahan = normalizeBahanForExport(bahan);
+
+const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
 
   const headerBlock = [
     ['RENCANA KERJA HARIAN'],
@@ -950,16 +1221,22 @@ function flattenRkhRows(header, items, bahan){
 
   const sections = await Promise.all(arr.map(async (r)=>{
   let items = (r._raw?.items)||[];
-  let bahan = (r._raw?.bahan)||[];
+let bahan = (r._raw?.bahan)||[];
 
-  // Inflate bila kosong
-  if(!(items && items.length)){
-    const det = await detailFromActuals(r.nomor);
-    items = det.items; bahan = det.bahan;
-  } else if(!(bahan && bahan.length)){
-    const det = await detailFromActuals(r.nomor);
-    if(det.bahan && det.bahan.length) bahan = det.bahan;
-  }
+// Inflate bila kosong dari actual STORE
+if(!(items && items.length)){
+  const det = await detailFromActuals(r.nomor);
+  items = det.items; bahan = det.bahan;
+}else if(!(bahan && bahan.length)){
+  const det = await detailFromActuals(r.nomor);
+  if(det.bahan && det.bahan.length) bahan = det.bahan;
+}
+
+// <<< NORMALISASI ketika source berasal dari form (lokasi array, idx kosong, hk_* belum ada)
+items = normalizeItemsForExport(items);
+bahan = normalizeBahanForExport(bahan);
+
+const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
 
   // >>> PENTING: deklarasikan sign DI SINI (dalam callback dan sebelum dipakai)
   let sign = { asisten: '' };
@@ -972,8 +1249,6 @@ function flattenRkhRows(header, items, bahan){
       estate_full: r.estate_full
     }) || { asisten: '' };
   }catch(_){ /* biarkan default */ }
-
-  const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
 
   const fmtJumlah = (s)=> String(s??'').split('\n').map(t=>t.trim() ? U.fmt.id0(t) : '').join('\n');
   const bodyRows = rows.map(obj => `
