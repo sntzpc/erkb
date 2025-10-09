@@ -34,6 +34,68 @@ Pages.pdoForm = function () {
     } catch (_) {}
   }
 
+  // ==== Utils umum (gunakan jika belum ada di file terkait) ====
+  function _lc(v) {
+    return (v == null ? "" : String(v)).trim().toLowerCase();
+  }
+  function _pick(o, keys) {
+    for (const k of keys) {
+      if (o && o[k] != null && String(o[k]).trim() !== "") return o[k];
+    }
+    return "";
+  }
+  // Normalisasi periode ke "YYYY-MM"
+  function _toYYYYMM(p) {
+    const s = String(p || "").trim();
+    if (/^\d{4}-\d{2}$/.test(s)) return s;
+    const d = new Date(s);
+    if (isNaN(d)) return s;
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    return `${y}-${m}`;
+  }
+  // Ambil koleksi RKB Header dari localStorage terlebih dahulu, fallback ke STORE.getActual(...)
+  function _collectRKBHeaders() {
+    const viaUS = U.S.get("kpl.actual.rkb", []) || [];
+    if (Array.isArray(viaUS) && viaUS.length) return viaUS;
+
+    // fallback umum yang sering dipakai backend
+    const cand = [
+      "rkb",
+      "rkb_header",
+      "rkb_headers",
+      "rkb_list",
+      "kpl.actual.rkb",
+    ];
+    for (const k of cand) {
+      const v = STORE?.getActual?.(k);
+      if (Array.isArray(v) && v.length) return v;
+    }
+    return [];
+  }
+  // Ambil field nomor/identitas RKB secara toleran
+  function _rkbNomor(row) {
+    return String(
+      _pick(row, ["nomor", "no_rkb", "rkb_no", "kode", "id", "no"]) || ""
+    ).trim();
+  }
+  function _rkbPeriode(row) {
+    return _toYYYYMM(_pick(row, ["periode", "period", "bulan", "month"]));
+  }
+  function _rkbEstate(row) {
+    return String(
+      _pick(row, ["estate_id", "estate", "id_estate"]) || ""
+    ).trim();
+  }
+  function _rkbRayon(row) {
+    return String(_pick(row, ["rayon_id", "rayon", "id_rayon"]) || "").trim();
+  }
+  function _rkbDivisi(row) {
+    return String(
+      _pick(row, ["divisi_id", "divisi", "divisi_kode", "kd_divisi"]) || ""
+    ).trim();
+  }
+
   // === Formatter yang mengikuti U.fmt bila ada ===
   const fmtIDR = (n) =>
     (U?.fmt?.idr ? U.fmt.idr : (x) => Number(x || 0).toLocaleString("id-ID"))(
@@ -194,13 +256,22 @@ Pages.pdoForm = function () {
     };
   }
 
-  function genNoPDO(divisi) {
-    const t = fmtStampWIB();
-    return `PDO${(divisi || "XX").toUpperCase()}${t.yy}${t.stamp.slice(
-      2,
-      8
-    )}${t.stamp.slice(9)}`;
-  }
+function genNoPDO(divisi) {
+  const tz = "Asia/Jakarta";
+  const d  = new Date();
+
+  const dd = new Intl.DateTimeFormat("id-ID", { timeZone: tz, day:   "2-digit" }).format(d);
+  const mm = new Intl.DateTimeFormat("id-ID", { timeZone: tz, month: "2-digit" }).format(d);
+  const yy = new Intl.DateTimeFormat("id-ID", { timeZone: tz, year:  "2-digit" }).format(d);
+  const hh = new Intl.DateTimeFormat("id-ID", { timeZone: tz, hour:  "2-digit", hour12:false }).format(d);
+  const mi = new Intl.DateTimeFormat("id-ID", { timeZone: tz, minute:"2-digit" }).format(d);
+  const ss = new Intl.DateTimeFormat("id-ID", { timeZone: tz, second:"2-digit" }).format(d);
+
+  const div = String(divisi || "XX").toUpperCase().replace(/\s+/g, "");
+  // PDO{divisi}{YYMMDD}{hhmmss}
+  return `PDO${div}${yy}${mm}${dd}${hh}${mi}${ss}`;
+}
+
 
   // ======== Master helpers (LOCAL ONLY) ========
   async function ensureWarm() {
@@ -287,20 +358,21 @@ Pages.pdoForm = function () {
   }
 
   // Normalisasi untuk membandingkan kode aktivitas: "TM PM-01" => "tmpm01"
-function normCode(s){
-  return String(s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-// Ambil nilai pertama yang ada dari daftar kandidat nama kolom
-function pickField(obj, keys){
-  for (const k of keys){
-    if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
-      return obj[k];
-    }
+  function normCode(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
   }
-  return "";
-}
 
+  // Ambil nilai pertama yang ada dari daftar kandidat nama kolom
+  function pickField(obj, keys) {
+    for (const k of keys) {
+      if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
+        return obj[k];
+      }
+    }
+    return "";
+  }
 
   // skor spesifisitas: lebih besar = lebih spesifik
   function specificityScore(row, want) {
@@ -437,58 +509,99 @@ function pickField(obj, keys){
     return num;
   }
 
-// --- Konsolidasi key agar konsisten di semua tempat ---
-const CODE_KEYS   = ["activity_type","kode","kd","type","kode_aktivitas","activity","activity_code","no_aktivitas","kodeKegiatan"];
-const NAMA_KEYS   = ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"];
-const SATUAN_KEYS = ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"];
-const TARIF_KEYS  = ["tarif_borongan","tarif","rate_borongan","harga","nilai"];
+  // --- Konsolidasi key agar konsisten di semua tempat ---
+  const CODE_KEYS = [
+    "activity_type",
+    "kode",
+    "kd",
+    "type",
+    "kode_aktivitas",
+    "activity",
+    "activity_code",
+    "no_aktivitas",
+    "kodeKegiatan",
+  ];
+  const NAMA_KEYS = [
+    "nama_pekerjaan",
+    "nama",
+    "pekerjaan",
+    "jenis",
+    "deskripsi",
+    "uraian",
+    "kegiatan",
+  ];
+  const SATUAN_KEYS = [
+    "satuan_borongan",
+    "satuan_default",
+    "satuan",
+    "uom",
+    "unit",
+    "satuan_output",
+  ];
+  const TARIF_KEYS = [
+    "tarif_borongan",
+    "tarif",
+    "rate_borongan",
+    "harga",
+    "nilai",
+  ];
 
-// Ambil nilai pertama yang ada dari daftar kandidat nama kolom
-function pickField(obj, keys){
-  for (const k of keys){
-    if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
-      return obj[k];
+  // Ambil nilai pertama yang ada dari daftar kandidat nama kolom
+  function pickField(obj, keys) {
+    for (const k of keys) {
+      if (obj && obj[k] != null && String(obj[k]).trim() !== "") {
+        return obj[k];
+      }
     }
+    return "";
   }
-  return "";
-}
 
-// Normalisasi kode aktivitas, mis. "TM PM-01" => "tmpm01"
-function normCode(s){
-  return String(s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
-}
+  // Normalisasi kode aktivitas, mis. "TM PM-01" => "tmpm01"
+  function normCode(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  }
 
-// ========== Perbaikan utama: resolve by NAME robust ==========
-function resolveActivityByName(nm){
-  const acts = getMasterMulti("yactivity","activity","activities");
-  const want = String(nm||"").trim().toLowerCase();
-  if(!want || !Array.isArray(acts) || !acts.length) return null;
+  // ========== Perbaikan utama: resolve by NAME robust ==========
+  function resolveActivityByName(nm) {
+    const acts = getMasterMulti("yactivity", "activity", "activities");
+    const want = String(nm || "")
+      .trim()
+      .toLowerCase();
+    if (!want || !Array.isArray(acts) || !acts.length) return null;
 
-  // 1) exact match pada salah satu NAMA_KEYS
-  let hit = acts.find(a => {
-    const nama = String(pickField(a, NAMA_KEYS) || "").trim().toLowerCase();
-    return nama === want;
-  });
-
-  // 2) fallback: mengandung unik (kalau exact tidak ketemu)
-  if(!hit){
-    const cand = acts.filter(a => {
-      const nama = String(pickField(a, NAMA_KEYS) || "").trim().toLowerCase();
-      return nama.includes(want);
+    // 1) exact match pada salah satu NAMA_KEYS
+    let hit = acts.find((a) => {
+      const nama = String(pickField(a, NAMA_KEYS) || "")
+        .trim()
+        .toLowerCase();
+      return nama === want;
     });
-    if(cand.length === 1) hit = cand[0];
+
+    // 2) fallback: mengandung unik (kalau exact tidak ketemu)
+    if (!hit) {
+      const cand = acts.filter((a) => {
+        const nama = String(pickField(a, NAMA_KEYS) || "")
+          .trim()
+          .toLowerCase();
+        return nama.includes(want);
+      });
+      if (cand.length === 1) hit = cand[0];
+    }
+    if (!hit) return null;
+
+    // Siapkan payload standar yang dipakai di tempat lain
+    const tipe = String(pickField(hit, CODE_KEYS) || "").trim();
+    const nama = String(pickField(hit, NAMA_KEYS) || "").trim();
+    const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
+    const tarif =
+      Number(
+        String(pickField(hit, TARIF_KEYS) || "").replace(/[^0-9.-]/g, "")
+      ) || 0;
+
+    return { activity_type: tipe, nama, satuan, tarif_borongan: tarif };
   }
-  if(!hit) return null;
-
-  // Siapkan payload standar yang dipakai di tempat lain
-  const tipe   = String(pickField(hit, CODE_KEYS)   || "").trim();
-  const nama   = String(pickField(hit, NAMA_KEYS)   || "").trim();
-  const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
-  const tarif  = Number(String(pickField(hit, TARIF_KEYS) || "").replace(/[^0-9.-]/g,"")) || 0;
-
-  return { activity_type: tipe, nama, satuan, tarif_borongan: tarif };
-}
-
 
   // ======== Model ========
   const DKEY = "pdo.form.buffer";
@@ -598,18 +711,18 @@ function resolveActivityByName(nm){
     saveDebounced();
   }
 
-function addHK() {
-  (F.hk = F.hk || []).push({
-    activity_type: "",   // << wajib diisi user
-    pekerjaan: "",       // akan terisi otomatis
-    satuan: "",
-    luas_ha: 0,
-    hk: 0,
-    tipe: "SKU",
-    total_rp: 0,
-  });
-  render();
-}
+  function addHK() {
+    (F.hk = F.hk || []).push({
+      activity_type: "", // << wajib diisi user
+      pekerjaan: "", // akan terisi otomatis
+      satuan: "",
+      luas_ha: 0,
+      hk: 0,
+      tipe: "SKU",
+      total_rp: 0,
+    });
+    render();
+  }
 
   function delHK(i) {
     F.hk.splice(i, 1);
@@ -617,17 +730,17 @@ function addHK() {
     render();
   }
 
-function addBorongan() {
-  (F.borongan = F.borongan || []).push({
-    activity_type: "",   // << wajib diisi user
-    pekerjaan: "",       // auto dari master
-    satuan: "",
-    qty: 0,
-    tarif_borongan: 0,
-    total_rp: 0,
-  });
-  render();
-}
+  function addBorongan() {
+    (F.borongan = F.borongan || []).push({
+      activity_type: "", // << wajib diisi user
+      pekerjaan: "", // auto dari master
+      satuan: "",
+      qty: 0,
+      tarif_borongan: 0,
+      total_rp: 0,
+    });
+    render();
+  }
 
   function delBorongan(i) {
     F.borongan.splice(i, 1);
@@ -772,22 +885,29 @@ function addBorongan() {
 
       // === BORONGAN (dari BHB) ===
       if (hkBHB > 0) {
-  const act = resolveActivityByName(it.pekerjaan || "");
-  const tipeAct = act?.activity_type || act?.kode || act?.kd || act?.type || "";
-  const satuanBor =
-    act?.satuan_borongan || act?.satuan_default || act?.satuan || it.satuan || "";
-  const tarifBor = Number(String(act?.tarif_borongan ?? '').replace(/[^0-9.-]/g,'')) || 0;
+        const act = resolveActivityByName(it.pekerjaan || "");
+        const tipeAct =
+          act?.activity_type || act?.kode || act?.kd || act?.type || "";
+        const satuanBor =
+          act?.satuan_borongan ||
+          act?.satuan_default ||
+          act?.satuan ||
+          it.satuan ||
+          "";
+        const tarifBor =
+          Number(String(act?.tarif_borongan ?? "").replace(/[^0-9.-]/g, "")) ||
+          0;
 
-  const qtyBor = r2(V * prop(hkBHB, baseHK)); // Qty = volume proporsional
-  BOR.push({
-    activity_type: tipeAct,          // ← penting (fix issue #2)
-    pekerjaan: it.pekerjaan || "",
-    satuan: satuanBor,
-    qty: qtyBor,
-    tarif_borongan: tarifBor,
-    total_rp: 0,
-  });
-}
+        const qtyBor = r2(V * prop(hkBHB, baseHK)); // Qty = volume proporsional
+        BOR.push({
+          activity_type: tipeAct, // ← penting (fix issue #2)
+          pekerjaan: it.pekerjaan || "",
+          satuan: satuanBor,
+          qty: qtyBor,
+          tarif_borongan: tarifBor,
+          total_rp: 0,
+        });
+      }
     });
 
     F.hk = HK;
@@ -812,6 +932,13 @@ function addBorongan() {
     const grand = totalHK + totalBor + totalPremi;
 
     return `
+      <div class="d-flex justify-content-end mb-2">
+    ${
+      READONLY
+        ? ""
+        : `<button id="btn-new-pdo" class="btn btn-danger">Buat PDO Baru</button>`
+    }
+  </div>
       <div class="card mb-3">
         <div class="card-body">
           ${
@@ -881,12 +1008,16 @@ function addBorongan() {
   }
 
   function hkBlock() {
-  return `
+    return `
   <div class="card mb-3">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <strong>Pekerjaan HK</strong>
-        ${READONLY ? "" : `<button class="btn btn-sm btn-outline-primary" id="btn-add-hk">Tambah Baris</button>`}
+        ${
+          READONLY
+            ? ""
+            : `<button class="btn btn-sm btn-outline-primary" id="btn-add-hk">Tambah Baris</button>`
+        }
       </div>
       <div class="table-responsive">
         <table class="table table-sm table-striped align-middle">
@@ -904,46 +1035,74 @@ function addBorongan() {
             </tr>
           </thead>
           <tbody>
-            ${(F.hk || []).map((it, i) => `
+            ${(F.hk || [])
+              .map(
+                (it, i) => `
               <tr data-row-type="hk" data-idx="${i}">
                 <td>${i + 1}</td>
                 <td>
                   <input type="text" class="form-control form-control-sm"
                     list="list-activity-type" data-sec="hk" data-k="activity_type" data-i="${i}"
-                    placeholder="ketik kode/tipe..." value="${it.activity_type||''}" ${READONLY?'disabled':''}/>
+                    placeholder="ketik kode/tipe..." value="${
+                      it.activity_type || ""
+                    }" ${READONLY ? "disabled" : ""}/>
                 </td>
                 <td>
                   <input type="text" class="form-control form-control-sm pdo-pekerjaan-input"
                     data-sec="hk" data-k="pekerjaan" data-i="${i}"
-                    value="${it.pekerjaan||''}" disabled />
+                    value="${it.pekerjaan || ""}" disabled />
                 </td>
-                <td><input class="form-control form-control-sm" data-sec="hk" data-k="satuan" data-i="${i}" value="${it.satuan||''}" ${READONLY?'disabled':''}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="luas_ha" data-i="${i}" value="${it.luas_ha||0}" ${READONLY?'disabled':''}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="hk" data-i="${i}" value="${it.hk||0}" ${READONLY?'disabled':''}/></td>
+                <td><input class="form-control form-control-sm" data-sec="hk" data-k="satuan" data-i="${i}" value="${
+                  it.satuan || ""
+                }" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="luas_ha" data-i="${i}" value="${
+                  it.luas_ha || 0
+                }" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="hk" data-i="${i}" value="${
+                  it.hk || 0
+                }" ${READONLY ? "disabled" : ""}/></td>
                 <td>
-                  <select class="form-select form-select-sm" data-sec="hk" data-k="tipe" data-i="${i}" ${READONLY?'disabled':''}>
-                    <option value="SKU" ${String(it.tipe||"") === "SKU" ? "selected":""}>SKU</option>
-                    <option value="BHL" ${String(it.tipe||"") === "BHL" ? "selected":""}>BHL</option>
+                  <select class="form-select form-select-sm" data-sec="hk" data-k="tipe" data-i="${i}" ${
+                  READONLY ? "disabled" : ""
+                }>
+                    <option value="SKU" ${
+                      String(it.tipe || "") === "SKU" ? "selected" : ""
+                    }>SKU</option>
+                    <option value="BHL" ${
+                      String(it.tipe || "") === "BHL" ? "selected" : ""
+                    }>BHL</option>
                   </select>
                 </td>
-                <td class="text-end pdo-total-cell" data-total-cell="hk-${i}">${fmtIDR(it.total_rp||0)}</td>
-                <td>${READONLY? "" : `<button class="btn btn-sm btn-danger" data-del-hk="${i}">Hapus</button>`}</td>
+                <td class="text-end pdo-total-cell" data-total-cell="hk-${i}">${fmtIDR(
+                  it.total_rp || 0
+                )}</td>
+                <td>${
+                  READONLY
+                    ? ""
+                    : `<button class="btn btn-sm btn-danger" data-del-hk="${i}">Hapus</button>`
+                }</td>
               </tr>
-            `).join('')}
+            `
+              )
+              .join("")}
           </tbody>
         </table>
       </div>
     </div>
   </div>`;
-}
+  }
 
   function boronganBlock() {
-  return `
+    return `
   <div class="card mb-3">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <strong>Pekerjaan Borongan</strong>
-        ${READONLY ? "" : `<button class="btn btn-sm btn-outline-primary" id="btn-add-bor">Tambah Baris</button>`}
+        ${
+          READONLY
+            ? ""
+            : `<button class="btn btn-sm btn-outline-primary" id="btn-add-bor">Tambah Baris</button>`
+        }
       </div>
       <div class="table-responsive">
         <table class="table table-sm table-striped align-middle">
@@ -960,32 +1119,50 @@ function addBorongan() {
             </tr>
           </thead>
           <tbody>
-            ${(F.borongan || []).map((it, i) => `
+            ${(F.borongan || [])
+              .map(
+                (it, i) => `
               <tr data-row-type="bor" data-idx="${i}">
                 <td>${i + 1}</td>
                 <td>
                   <input type="text" class="form-control form-control-sm"
                     list="list-activity-type" data-sec="bor" data-k="activity_type" data-i="${i}"
-                    placeholder="ketik kode/tipe..." value="${it.activity_type||''}" ${READONLY?'disabled':''}/>
+                    placeholder="ketik kode/tipe..." value="${
+                      it.activity_type || ""
+                    }" ${READONLY ? "disabled" : ""}/>
                 </td>
                 <td>
                   <input type="text" class="form-control form-control-sm pdo-pekerjaan-input"
                     data-sec="bor" data-k="pekerjaan" data-i="${i}"
-                    value="${it.pekerjaan||''}" disabled />
+                    value="${it.pekerjaan || ""}" disabled />
                 </td>
-                <td><input class="form-control form-control-sm" data-sec="bor" data-k="satuan" data-i="${i}" value="${it.satuan||''}" ${READONLY?'disabled':''}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="bor" data-k="qty" data-i="${i}" value="${it.qty||0}" ${READONLY?'disabled':''}/></td>
-                <td><input type="text" class="form-control form-control-sm" data-sec="bor" data-k="tarif_borongan" data-i="${i}" value="${fmtIDR(it.tarif_borongan||0)}" ${READONLY?'disabled':''}/></td>
-                <td class="text-end pdo-total-cell" data-total-cell="bor-${i}">${fmtIDR(it.total_rp||0)}</td>
-                <td>${READONLY? "" : `<button class="btn btn-sm btn-danger" data-del-bor="${i}">Hapus</button>`}</td>
+                <td><input class="form-control form-control-sm" data-sec="bor" data-k="satuan" data-i="${i}" value="${
+                  it.satuan || ""
+                }" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="bor" data-k="qty" data-i="${i}" value="${
+                  it.qty || 0
+                }" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="text" class="form-control form-control-sm" data-sec="bor" data-k="tarif_borongan" data-i="${i}" value="${fmtIDR(
+                  it.tarif_borongan || 0
+                )}" ${READONLY ? "disabled" : ""}/></td>
+                <td class="text-end pdo-total-cell" data-total-cell="bor-${i}">${fmtIDR(
+                  it.total_rp || 0
+                )}</td>
+                <td>${
+                  READONLY
+                    ? ""
+                    : `<button class="btn btn-sm btn-danger" data-del-bor="${i}">Hapus</button>`
+                }</td>
               </tr>
-            `).join('')}
+            `
+              )
+              .join("")}
           </tbody>
         </table>
       </div>
     </div>
   </div>`;
-}
+  }
 
   function updateHeaderTotalsUI() {
     // Update kolom total di header saja (tanpa render penuh)
@@ -1001,7 +1178,6 @@ function addBorongan() {
       Number(F.premi_panen || 0) + Number(F.premi_non_panen || 0);
     const grand = totalHK + totalBor + totalPremi;
 
-    const inputTotal = root.querySelector(".card input[disabled][value]");
     // lebih aman: cari input "Total PDO" berdasarkan label
     const totalInput = Array.from(
       root.querySelectorAll(".card .form-control[disabled]")
@@ -1032,67 +1208,277 @@ function addBorongan() {
     `;
   }
 
-  function backfillActivityFromName(row, isBor){
-  if (row.activity_type) return;
-  if (!row.pekerjaan) return;
-  const a = resolveActivityByName(row.pekerjaan);
-  if (!a) return;
-  row.activity_type = a.activity_type || a.kode || a.kd || a.type || '';
-  row.satuan = row.satuan || a.satuan_borongan || a.satuan_default || a.satuan || '';
-  if (isBor && !Number(row.tarif_borongan||0)) {
-    row.tarif_borongan = Number(String(a.tarif_borongan??'').replace(/[^0-9.-]/g,''))||0;
+  function backfillActivityFromName(row, isBor) {
+    if (row.activity_type) return;
+    if (!row.pekerjaan) return;
+    const a = resolveActivityByName(row.pekerjaan);
+    if (!a) return;
+    row.activity_type = a.activity_type || a.kode || a.kd || a.type || "";
+    row.satuan =
+      row.satuan || a.satuan_borongan || a.satuan_default || a.satuan || "";
+    if (isBor && !Number(row.tarif_borongan || 0)) {
+      row.tarif_borongan =
+        Number(String(a.tarif_borongan ?? "").replace(/[^0-9.-]/g, "")) || 0;
+    }
   }
-}
-
 
   function getActivities() {
     return getMasterMulti("yactivity", "activity", "activities") || [];
   }
 
-// Lookup by activity_type (kode) – tolerant
-function pickActivityByType(code){
-  const raw = String(code||"").trim();
-  if (!raw) return null;
+  // Lookup by activity_type (kode) – tolerant
+  function pickActivityByType(code) {
+    const raw = String(code || "").trim();
+    if (!raw) return null;
 
-  const want = normCode(raw);
-  const acts = getActivities();
+    const want = normCode(raw);
+    const acts = getActivities();
 
-  // cari kandidat: cocokkan berdasarkan berbagai kemungkinan nama kolom "kode"
-  const CODE_KEYS = [
-    "activity_type", "kode", "kd", "type", "kode_aktivitas",
-    "activity", "activity_code", "no_aktivitas", "kodeKegiatan"
-  ];
+    // cari kandidat: cocokkan berdasarkan berbagai kemungkinan nama kolom "kode"
+    const CODE_KEYS = [
+      "activity_type",
+      "kode",
+      "kd",
+      "type",
+      "kode_aktivitas",
+      "activity",
+      "activity_code",
+      "no_aktivitas",
+      "kodeKegiatan",
+    ];
 
-  // 1) exact match (setelah norm) pada salah satu kolom kode
-  let hit = acts.find(a => {
-    const kode = pickField(a, CODE_KEYS);
-    return normCode(kode) === want;
-  });
-
-  // 2) fallback: contains yg unik
-  if (!hit) {
-    const cand = acts.filter(a => {
+    // 1) exact match (setelah norm) pada salah satu kolom kode
+    let hit = acts.find((a) => {
       const kode = pickField(a, CODE_KEYS);
-      return normCode(kode).includes(want);
+      return normCode(kode) === want;
     });
-    if (cand.length === 1) hit = cand[0];
+
+    // 2) fallback: contains yg unik
+    if (!hit) {
+      const cand = acts.filter((a) => {
+        const kode = pickField(a, CODE_KEYS);
+        return normCode(kode).includes(want);
+      });
+      if (cand.length === 1) hit = cand[0];
+    }
+    if (!hit) return null;
+
+    // mapping fleksibel untuk nama/pekerjaan/satuan/tarif
+    const NAMA_KEYS = [
+      "nama_pekerjaan",
+      "nama",
+      "pekerjaan",
+      "jenis",
+      "deskripsi",
+      "uraian",
+      "kegiatan",
+    ];
+    const SATUAN_KEYS = [
+      "satuan_borongan",
+      "satuan_default",
+      "satuan",
+      "uom",
+      "unit",
+      "satuan_output",
+    ];
+    const TARIF_KEYS = [
+      "tarif_borongan",
+      "tarif",
+      "rate_borongan",
+      "harga",
+      "nilai",
+    ];
+
+    const nama = String(pickField(hit, NAMA_KEYS) || "").trim();
+    const tipe = String(pickField(hit, CODE_KEYS) || "").trim();
+    const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
+    const tarif =
+      Number(
+        String(pickField(hit, TARIF_KEYS) || "").replace(/[^0-9.-]/g, "")
+      ) || 0;
+
+    return { nama, activity_type: tipe, satuan, tarif_borongan: tarif };
   }
-  if (!hit) return null;
 
-  // mapping fleksibel untuk nama/pekerjaan/satuan/tarif
-  const NAMA_KEYS   = ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"];
-  const SATUAN_KEYS = ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"];
-  const TARIF_KEYS  = ["tarif_borongan","tarif","rate_borongan","harga","nilai"];
+  // === (copy dari versi di pdo_list.js; aman karena protected by id check) ===
+  (function ensureNewPdoModal() {
+    if (document.getElementById("pdo-new-modal")) return;
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `
+<div class="modal fade" id="pdo-new-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Buat PDO Baru (Pilih RKB)</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label class="form-label">Cari RKB</label>
+          <input id="npdo-q" class="form-control" placeholder="ketik nomor/periode/divisi..." />
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead><tr>
+              <th style="width:40px">#</th>
+              <th>No. RKB</th>
+              <th>Periode</th>
+              <th>Divisi</th>
+              <th>Estate</th>
+              <th>Rayon</th>
+              <th style="width:90px">Aksi</th>
+            </tr></thead>
+            <tbody id="npdo-rows"><tr><td colspan="7" class="text-muted">Memuat...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="small text-muted" id="npdo-info"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+    document.body.appendChild(wrap.firstElementChild);
+  })();
 
-  const nama   = String(pickField(hit, NAMA_KEYS)   || "").trim();
-  const tipe   = String(pickField(hit, CODE_KEYS)   || "").trim();
-  const satuan = String(pickField(hit, SATUAN_KEYS) || "").trim();
-  const tarif  = Number(String(pickField(hit, TARIF_KEYS) || "")
-                  .replace(/[^0-9.-]/g,"")) || 0;
+  function _pdoHasRefRkb(ref) {
+    if (!ref) return false;
+    const drafts = U.S.get("kpl.actual.pdo_draft", []) || [];
+    if (drafts.some((x) => _lc(x.ref_rkb) === _lc(ref))) return true;
+    const candHdr = ["pdo", "pdo_header", "pdo_headers", "pdo_list"];
+    for (const k of candHdr) {
+      const v = STORE?.getActual?.(k);
+      if (Array.isArray(v) && v.some((x) => _lc(x.ref_rkb || "") === _lc(ref)))
+        return true;
+    }
+    return false;
+  }
 
-  return { nama, activity_type: tipe, satuan, tarif_borongan: tarif };
-}
+  function _pdoRefBadge(ref) {
+    return _pdoHasRefRkb(ref)
+      ? `<span class="badge rounded-pill text-bg-warning ms-1">Sudah ada PDO</span>`
+      : "";
+  }
 
+  function _newPdoSeedFromRkb(row) {
+    const ref = _rkbNomor(row);
+    return {
+      nomor: "", // akan di-generate saat init()
+      ref_rkb: ref,
+      periode: _rkbPeriode(row),
+      estate_id: _rkbEstate(row),
+      rayon_id: _rkbRayon(row),
+      divisi_id: _rkbDivisi(row),
+      upah_hk_bhl: 0,
+      upah_hk_sku: 0,
+      premi_panen: 0,
+      premi_non_panen: 0,
+      target_produksi_ton: 0,
+      hk: [],
+      borongan: [],
+      created_ts: null,
+      askep_ts: null,
+      manager_ts: null,
+      status: "draft",
+    };
+  }
+
+  function _renderRkbTable(rows) {
+    const tb = document.getElementById("npdo-rows");
+    const info = document.getElementById("npdo-info");
+    if (!rows.length) {
+      tb.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Tidak ada RKB.</td></tr>`;
+      info.textContent = "";
+      return;
+    }
+    tb.innerHTML = rows
+      .map((r, i) => {
+        const no = _rkbNomor(r);
+        const per = _rkbPeriode(r);
+        const div = _rkbDivisi(r);
+        const est = _rkbEstate(r);
+        const ray = _rkbRayon(r);
+        const disabled = _pdoHasRefRkb(no) ? "disabled" : "";
+        return `<tr>
+      <td>${i + 1}</td>
+      <td>${no} ${_pdoRefBadge(no)}</td>
+      <td>${per || "-"}</td>
+      <td>${div || "-"}</td>
+      <td>${est || "-"}</td>
+      <td>${ray || "-"}</td>
+      <td><button class="btn btn-sm btn-danger" data-newpdo="${no}" ${disabled}>Pilih</button></td>
+    </tr>`;
+      })
+      .join("");
+    info.textContent = `Menampilkan ${rows.length} RKB.`;
+    tb.querySelectorAll("button[data-newpdo]").forEach((b) => {
+      b.onclick = () => onPickRkbForNewPdo(String(b.dataset.newpdo));
+    });
+  }
+
+  function openNewPdoModal() {
+    const all = _collectRKBHeaders();
+    const rows = (all || []).slice().sort((a, b) => {
+      const pa = _rkbPeriode(a),
+        pb = _rkbPeriode(b);
+      return (
+        String(pb).localeCompare(String(pa)) ||
+        _rkbNomor(b).localeCompare(_rkbNomor(a))
+      );
+    });
+    const modalEl = document.getElementById("pdo-new-modal");
+    const m = bootstrap?.Modal ? new bootstrap.Modal(modalEl) : null;
+    _renderRkbTable(rows);
+    if (m) m.show();
+
+    const q = document.getElementById("npdo-q");
+    q.value = "";
+    q.oninput = () => {
+      const s = _lc(q.value);
+      const filtered = rows.filter((r) => {
+        return [
+          _rkbNomor(r),
+          _rkbPeriode(r),
+          _rkbDivisi(r),
+          _rkbEstate(r),
+          _rkbRayon(r),
+        ].some((v) => _lc(v).includes(s));
+      });
+      _renderRkbTable(filtered);
+    };
+  }
+
+  function onPickRkbForNewPdo(nomorRkb) {
+    if (_pdoHasRefRkb(nomorRkb)) {
+      U.alert(
+        "Setiap No. RKB hanya boleh memiliki 1 PDO.\nRKB terpilih sudah memiliki PDO."
+      );
+      return;
+    }
+    const row = (_collectRKBHeaders() || []).find(
+      (x) => _rkbNomor(x) === nomorRkb
+    );
+    if (!row) {
+      U.alert("RKB tidak ditemukan di lokal.");
+      return;
+    }
+
+    // Reset buffer → seed baru berdasarkan RKB
+    const seed = _newPdoSeedFromRkb(row);
+    U.S.set("pdo.form.buffer", seed);
+    U.S.del("pdo.form.readonly");
+
+    // Muat ulang form (init() akan generate nomor & prefill dari RKB)
+    location.hash = "#/pdo/form";
+
+    // tutup modal
+    try {
+      const modalEl = document.getElementById("pdo-new-modal");
+      const inst = bootstrap.Modal.getInstance(modalEl);
+      if (inst) inst.hide();
+    } catch (_) {}
+  }
 
   function render() {
     const totalHK = (F.hk || []).reduce(
@@ -1112,22 +1498,68 @@ function pickActivityByType(code){
       ${hkBlock()}
       ${boronganBlock()}
       <datalist id="list-activity-type">
-  ${getActivities().map(a=>{
-    const type  = String(pickField(a, [
-      "activity_type","kode","kd","type","kode_aktivitas","activity","activity_code","no_aktivitas","kodeKegiatan"
-    ]) || "").trim();
-    const nama  = String(pickField(a, ["nama_pekerjaan","nama","pekerjaan","jenis","deskripsi","uraian","kegiatan"]) || "").trim();
-    const satuan= String(pickField(a, ["satuan_borongan","satuan_default","satuan","uom","unit","satuan_output"]) || "").trim();
-    const tarif = Number(String(pickField(a, ["tarif_borongan","tarif","rate_borongan","harga","nilai"]) || "")
-                    .replace(/[^0-9.-]/g,"")) || 0;
+  ${getActivities()
+    .map((a) => {
+      const type = String(
+        pickField(a, [
+          "activity_type",
+          "kode",
+          "kd",
+          "type",
+          "kode_aktivitas",
+          "activity",
+          "activity_code",
+          "no_aktivitas",
+          "kodeKegiatan",
+        ]) || ""
+      ).trim();
+      const nama = String(
+        pickField(a, [
+          "nama_pekerjaan",
+          "nama",
+          "pekerjaan",
+          "jenis",
+          "deskripsi",
+          "uraian",
+          "kegiatan",
+        ]) || ""
+      ).trim();
+      const satuan = String(
+        pickField(a, [
+          "satuan_borongan",
+          "satuan_default",
+          "satuan",
+          "uom",
+          "unit",
+          "satuan_output",
+        ]) || ""
+      ).trim();
+      const tarif =
+        Number(
+          String(
+            pickField(a, [
+              "tarif_borongan",
+              "tarif",
+              "rate_borongan",
+              "harga",
+              "nilai",
+            ]) || ""
+          ).replace(/[^0-9.-]/g, "")
+        ) || 0;
 
-    const label = [type, nama?`– ${nama}`:"", satuan?`(${satuan})`:""].filter(Boolean).join(" ");
-    return `<option value="${type}" data-nama="${nama}" data-satuan="${satuan}" data-tarif="${tarif}">${label}</option>`;
-  }).join("")}
+      const label = [type, nama ? `– ${nama}` : "", satuan ? `(${satuan})` : ""]
+        .filter(Boolean)
+        .join(" ");
+      return `<option value="${type}" data-nama="${nama}" data-satuan="${satuan}" data-tarif="${tarif}">${label}</option>`;
+    })
+    .join("")}
 </datalist>
 
 ${footerActions()}
     `;
+
+    const btnNew = U.qs('#btn-new-pdo');
+      if (!READONLY && btnNew) btnNew.onclick = openNewPdoModal;
 
     if (!READONLY) {
       const elTarget = U.qs("#inp-target");
@@ -1162,61 +1594,62 @@ ${footerActions()}
       U.qsa("input[data-sec], select[data-sec]").forEach((inp) => {
         // pakai event 'input' tetap, tapi tanpa render ulang
         const onChange = () => {
-  const sec = inp.dataset.sec;
-  const k   = inp.dataset.k;
-  const i   = Number(inp.dataset.i);
-  const arr = sec === "hk" ? F.hk : F.borongan;
+          const sec = inp.dataset.sec;
+          const k = inp.dataset.k;
+          const i = Number(inp.dataset.i);
+          const arr = sec === "hk" ? F.hk : F.borongan;
 
-  // simpan nilai (pastikan numerik utk tarif)
-  if (k === "tarif_borongan") {
-    arr[i][k] = parseLocal(inp.value);
-  } else if (inp.type === "number") {
-    arr[i][k] = Number(inp.value || 0);
-  } else {
-    arr[i][k] = inp.value;
-  }
+          // simpan nilai (pastikan numerik utk tarif)
+          if (k === "tarif_borongan") {
+            arr[i][k] = parseLocal(inp.value);
+          } else if (inp.type === "number") {
+            arr[i][k] = Number(inp.value || 0);
+          } else {
+            arr[i][k] = inp.value;
+          }
 
-  // ketika activity_type diubah → isi turunan
-  if (k === 'activity_type') {
-    const meta = pickActivityByType(inp.value || '');
-    const tr   = inp.closest('tr');
-    const elJob= tr && tr.querySelector('input[data-k="pekerjaan"]');
-    const elSat= tr && tr.querySelector('input[data-k="satuan"]');
-    const elTar= tr && tr.querySelector('input[data-k="tarif_borongan"]');
+          // ketika activity_type diubah → isi turunan
+          if (k === "activity_type") {
+            const meta = pickActivityByType(inp.value || "");
+            const tr = inp.closest("tr");
+            const elJob = tr && tr.querySelector('input[data-k="pekerjaan"]');
+            const elSat = tr && tr.querySelector('input[data-k="satuan"]');
+            const elTar =
+              tr && tr.querySelector('input[data-k="tarif_borongan"]');
 
-    if (meta) {
-      arr[i].activity_type   = meta.activity_type;
-      arr[i].pekerjaan       = meta.nama;
-      arr[i].satuan          = meta.satuan || arr[i].satuan || '';
-      if (sec === 'bor') {
-        arr[i].tarif_borongan = Number(meta.tarif_borongan||0);
-      }
-      if (elJob) elJob.value = arr[i].pekerjaan || '';
-      if (elSat) elSat.value = arr[i].satuan || '';
-      if (elTar) {
-        elTar.value = fmtIDR(arr[i].tarif_borongan || 0);
-        if (!elTar.id) elTar.id = `tarif-bor-${i}`;
-        attachMaskText(elTar.id, 'idr', (v)=>{
-          arr[i].tarif_borongan = v;
+            if (meta) {
+              arr[i].activity_type = meta.activity_type;
+              arr[i].pekerjaan = meta.nama;
+              arr[i].satuan = meta.satuan || arr[i].satuan || "";
+              if (sec === "bor") {
+                arr[i].tarif_borongan = Number(meta.tarif_borongan || 0);
+              }
+              if (elJob) elJob.value = arr[i].pekerjaan || "";
+              if (elSat) elSat.value = arr[i].satuan || "";
+              if (elTar) {
+                elTar.value = fmtIDR(arr[i].tarif_borongan || 0);
+                if (!elTar.id) elTar.id = `tarif-bor-${i}`;
+                attachMaskText(elTar.id, "idr", (v) => {
+                  arr[i].tarif_borongan = v;
+                  recomputeTotals();
+                  saveDebounced();
+                });
+              }
+            } else {
+              // kode tak dikenali → kosongkan nama pekerjaan saja
+              arr[i].pekerjaan = "";
+              if (elJob) elJob.value = "";
+              // satuan/tarif biarkan (jangan ditimpa) jika user sudah isi manual
+            }
+          }
+
+          // dukungan lama bila kolom pekerjaan (yang sudah disabled) kebetulan aktif di draft lama:
+          if (k === "pekerjaan" && !inp.disabled) {
+            // tidak perlu apa-apa, atau bisa resolve nama → kode jika Anda mau.
+          }
+
           recomputeTotals();
-          saveDebounced();
-        });
-      }
-    } else {
-      // kode tak dikenali → kosongkan nama pekerjaan saja
-      arr[i].pekerjaan = '';
-      if (elJob) elJob.value = '';
-      // satuan/tarif biarkan (jangan ditimpa) jika user sudah isi manual
-    }
-  }
-
-  // dukungan lama bila kolom pekerjaan (yang sudah disabled) kebetulan aktif di draft lama:
-  if (k === 'pekerjaan' && !inp.disabled) {
-    // tidak perlu apa-apa, atau bisa resolve nama → kode jika Anda mau.
-  }
-
-  recomputeTotals();
-};
+        };
         // untuk mengurangi “spam” event di perangkat tertentu, debounce dikit
         inp.addEventListener("input", U.debounce(onChange, 30));
         inp.addEventListener("change", onChange);
@@ -1230,12 +1663,12 @@ ${footerActions()}
       );
 
       const btnSave = U.qs("#btn-save-draft");
-if (btnSave) {
-  btnSave.addEventListener('click', (e)=>{
-    e.preventDefault(); // jaga-jaga kalau nanti dibungkus <form>
-    onSaveDraft();
-  });
-}
+      if (btnSave) {
+        btnSave.addEventListener("click", (e) => {
+          e.preventDefault(); // jaga-jaga kalau nanti dibungkus <form>
+          onSaveDraft();
+        });
+      }
     }
     if (!READONLY) {
       attachMaskText("inp-target", "id2", (v) => {
@@ -1256,202 +1689,274 @@ if (btnSave) {
       });
 
       // Masker untuk semua input tarif borongan di tabel (tiap baris borongan)
-      U.qsa('tr[data-row-type="bor"] input[data-k="tarif_borongan"]').forEach((el, i)=>{
-  if (!el.id) el.id = `tarif-bor-${i}`;
-  attachMaskText(el.id, 'idr', (v)=>{
-    if (Array.isArray(F.borongan) && F.borongan[i]) {
-      F.borongan[i].tarif_borongan = v;
-      recomputeTotals();
-      saveDebounced();
-    }
-  });
-});
-
+      U.qsa('tr[data-row-type="bor"] input[data-k="tarif_borongan"]').forEach(
+        (el, i) => {
+          if (!el.id) el.id = `tarif-bor-${i}`;
+          attachMaskText(el.id, "idr", (v) => {
+            if (Array.isArray(F.borongan) && F.borongan[i]) {
+              F.borongan[i].tarif_borongan = v;
+              recomputeTotals();
+              saveDebounced();
+            }
+          });
+        }
+      );
     }
     updateHeaderTotalsUI();
   }
 
   // ======== VALIDATION ========
-function clearValidationMarks(){
-  root.querySelectorAll('.is-invalid').forEach(el=>{
-    el.classList.remove('is-invalid');
-    el.removeAttribute('title');
-  });
-}
-
-function markInvalid(el, msg){
-  if(!el) return;
-  el.classList.add('is-invalid');
-  if(msg) el.setAttribute('title', msg);
-}
-
-function findCellInput(sec, k, i){
-  return root.querySelector(`tr[data-row-type="${sec}"] [data-sec="${sec}"][data-k="${k}"][data-i="${i}"]`);
-}
-
-// Wajib terisi (string non-kosong)
-function reqStr(val){ return String(val ?? '').trim() !== ''; }
-// Wajib > 0 (angka)
-function reqPos(val){ return Number(val || 0) > 0; }
-
-function validateBeforeSave(){
-  // Sinkronkan nilai dari UI (kalau user baru mengetik lalu langsung klik)
-const elTargetNow = root.querySelector('#inp-target');
-if (elTargetNow) F.target_produksi_ton = parseLocal(elTargetNow.value);
-
-  clearValidationMarks();
-  const errors = [];
-  let firstEl = null;
-
-  // ===== Header checks =====
-  // NB: periode & nomor disabled namun kita tetap pastikan nilainya ada
-  if(!reqStr(F.periode)){ errors.push('Periode wajib diisi.'); }
-  if(!reqStr(F.nomor)){ errors.push('Nomor PDO wajib ada.'); }
-  if(!reqStr(F.ref_rkb)){ errors.push('Ref. RKB wajib diisi.'); }
-
-  if(!reqStr(F.divisi_id)){ errors.push('Divisi wajib diisi.'); }
-  if(!reqStr(F.estate_id)){ errors.push('Estate wajib diisi.'); }
-  if(!reqStr(F.rayon_id)){ errors.push('Rayon wajib diisi.'); }
-
-  // Angka header: semua wajib > 0 sesuai permintaan
-// Angka header: semua wajib > 0 sesuai permintaan
-const elTarget = root.querySelector('#inp-target');
-
-// KOERSI: pastikan model numeric dulu (atasi kasus "0,00" dsb.)
-F.target_produksi_ton = parseLocal(F.target_produksi_ton);
-
-if (!reqPos(F.target_produksi_ton)) {
-  errors.push('Target Produksi (Ton) harus > 0.');
-  if (!firstEl) firstEl = elTarget;
-  markInvalid(elTarget, 'Wajib lebih dari nol');
-}
-  const elPremiP = root.querySelector('#inp-premi-panen');
-  if(!reqPos(F.premi_panen)){
-    errors.push('Premi Panen harus > 0.');
-    if(!firstEl) firstEl = elPremiP;
-    markInvalid(elPremiP, 'Wajib lebih dari nol');
-  }
-  const elPremiN = root.querySelector('#inp-premi-non');
-  if(!reqPos(F.premi_non_panen)){
-    errors.push('Premi Non Panen harus > 0.');
-    if(!firstEl) firstEl = elPremiN;
-    markInvalid(elPremiN, 'Wajib lebih dari nol');
+  function clearValidationMarks() {
+    root.querySelectorAll(".is-invalid").forEach((el) => {
+      el.classList.remove("is-invalid");
+      el.removeAttribute("title");
+    });
   }
 
-  // Upah HK (disabled tapi tetap wajib ada dan >0)
-  if(!reqPos(F.upah_hk_sku)){
-    errors.push('Upah HK SKU belum tersedia (> 0) — tarik master yrates.');
-  }
-  if(!reqPos(F.upah_hk_bhl)){
-    errors.push('Upah HK BHL belum tersedia (> 0) — tarik master yrates.');
+  function markInvalid(el, msg) {
+    if (!el) return;
+    el.classList.add("is-invalid");
+    if (msg) el.setAttribute("title", msg);
   }
 
-  // Minimal harus ada isi baris HK atau Borongan
-  const hasAnyRow = Array.isArray(F.hk) && F.hk.length || Array.isArray(F.borongan) && F.borongan.length;
-  if(!hasAnyRow){
-    errors.push('Tambahkan minimal satu baris HK atau Borongan.');
+  function findCellInput(sec, k, i) {
+    return root.querySelector(
+      `tr[data-row-type="${sec}"] [data-sec="${sec}"][data-k="${k}"][data-i="${i}"]`
+    );
   }
 
-  // ===== Detail HK =====
-  (F.hk || []).forEach((it, i)=>{
-    const elType = findCellInput('hk','activity_type',i);
-    const elJob  = findCellInput('hk','pekerjaan',i); // disabled; hanya penanda error
-    const elSat  = findCellInput('hk','satuan',i);
-    const elLuas = findCellInput('hk','luas_ha',i);
-    const elHK   = findCellInput('hk','hk',i);
-    const elTipe = root.querySelector(`tr[data-row-type="hk"] select[data-sec="hk"][data-k="tipe"][data-i="${i}"]`);
-
-    if(!reqStr(it.activity_type)){
-      errors.push(`HK baris ${i+1}: Activity Type wajib diisi.`);
-      if(!firstEl) firstEl = elType;
-      markInvalid(elType, 'Wajib diisi');
-    }
-    if(!reqStr(it.pekerjaan)){
-      errors.push(`HK baris ${i+1}: Jenis Pekerjaan tidak terbaca dari master.`);
-      if(!firstEl) firstEl = elType || elJob;
-      markInvalid(elJob || elType, 'Isi/benarkan Activity Type (nama otomatis)');
-    }
-    if(!reqStr(it.satuan)){
-      errors.push(`HK baris ${i+1}: Satuan wajib diisi.`);
-      if(!firstEl) firstEl = elSat;
-      markInvalid(elSat, 'Wajib diisi');
-    }
-    if(!reqPos(it.luas_ha)){
-      errors.push(`HK baris ${i+1}: Luas harus > 0.`);
-      if(!firstEl) firstEl = elLuas;
-      markInvalid(elLuas, 'Wajib > 0');
-    }
-    if(!reqPos(it.hk)){
-      errors.push(`HK baris ${i+1}: HK harus > 0.`);
-      if(!firstEl) firstEl = elHK;
-      markInvalid(elHK, 'Wajib > 0');
-    }
-    if(!reqStr(it.tipe)){
-      errors.push(`HK baris ${i+1}: Tipe HK wajib (SKU/BHL).`);
-      if(!firstEl) firstEl = elTipe;
-      markInvalid(elTipe, 'Pilih tipe');
-    }
-    if(!reqPos(it.total_rp)){
-      // total dihitung otomatis; kalau 0 kemungkinan upah 0 atau hk 0
-      errors.push(`HK baris ${i+1}: Total (Rp) masih 0 — cek Upah/HK.`);
-      // tak perlu mark: sudah ditandai di komponen penyebab
-    }
-  });
-
-  // ===== Detail BORONGAN =====
-  (F.borongan || []).forEach((it, i)=>{
-    const elType = findCellInput('bor','activity_type',i);
-    const elJob  = findCellInput('bor','pekerjaan',i); // disabled; hanya penanda error
-    const elSat  = findCellInput('bor','satuan',i);
-    const elQty  = findCellInput('bor','qty',i);
-    const elTar  = findCellInput('bor','tarif_borongan',i);
-
-    if(!reqStr(it.activity_type)){
-      errors.push(`Borongan baris ${i+1}: Activity Type wajib diisi.`);
-      if(!firstEl) firstEl = elType;
-      markInvalid(elType, 'Wajib diisi');
-    }
-    if(!reqStr(it.pekerjaan)){
-      errors.push(`Borongan baris ${i+1}: Jenis Pekerjaan tidak terbaca dari master.`);
-      if(!firstEl) firstEl = elType || elJob;
-      markInvalid(elJob || elType, 'Isi/benarkan Activity Type (nama otomatis)');
-    }
-    if(!reqStr(it.satuan)){
-      errors.push(`Borongan baris ${i+1}: Satuan wajib diisi.`);
-      if(!firstEl) firstEl = elSat;
-      markInvalid(elSat, 'Wajib diisi');
-    }
-    if(!reqPos(it.qty)){
-      errors.push(`Borongan baris ${i+1}: Qty harus > 0.`);
-      if(!firstEl) firstEl = elQty;
-      markInvalid(elQty, 'Wajib > 0');
-    }
-    if(!reqPos(it.tarif_borongan)){
-      errors.push(`Borongan baris ${i+1}: Tarif Borongan harus > 0.`);
-      if(!firstEl) firstEl = elTar;
-      markInvalid(elTar, 'Wajib > 0');
-    }
-    if(!reqPos(it.total_rp)){
-      errors.push(`Borongan baris ${i+1}: Total (Rp) masih 0 — cek Qty/Tarif.`);
-    }
-  });
-
-  if (errors.length){
-  U.alert(`Periksa kembali isian Anda:\n\n• ${errors.join('\n• ')}`);
-  U.toast('Validasi gagal. Periksa bidang yang ditandai.', 'danger');
-  if (firstEl){
-    try{ firstEl.scrollIntoView({behavior:'smooth', block:'center'}); }catch(_){}
-    try{ firstEl.focus(); }catch(_){}
+  // Wajib terisi (string non-kosong)
+  function reqStr(val) {
+    return String(val ?? "").trim() !== "";
   }
-  return false;
-}
-  return true;
-}
+  // Wajib > 0 (angka)
+  function reqPos(val) {
+    return Number(val || 0) > 0;
+  }
 
+  function validateBeforeSave() {
+    // Sinkronkan nilai dari UI (kalau user baru mengetik lalu langsung klik)
+    const elTargetNow = root.querySelector("#inp-target");
+    if (elTargetNow) F.target_produksi_ton = parseLocal(elTargetNow.value);
+
+    clearValidationMarks();
+    const errors = [];
+    let firstEl = null;
+
+    // ===== Header checks =====
+    // NB: periode & nomor disabled namun kita tetap pastikan nilainya ada
+    if (!reqStr(F.periode)) {
+      errors.push("Periode wajib diisi.");
+    }
+    if (!reqStr(F.nomor)) {
+      errors.push("Nomor PDO wajib ada.");
+    }
+    if (!reqStr(F.ref_rkb)) {
+      errors.push("Ref. RKB wajib diisi.");
+    }
+
+    if (!reqStr(F.divisi_id)) {
+      errors.push("Divisi wajib diisi.");
+    }
+    if (!reqStr(F.estate_id)) {
+      errors.push("Estate wajib diisi.");
+    }
+    if (!reqStr(F.rayon_id)) {
+      errors.push("Rayon wajib diisi.");
+    }
+
+    // Angka header: semua wajib > 0 sesuai permintaan
+    // Angka header: semua wajib > 0 sesuai permintaan
+    const elTarget = root.querySelector("#inp-target");
+
+    // KOERSI: pastikan model numeric dulu (atasi kasus "0,00" dsb.)
+    F.target_produksi_ton = parseLocal(F.target_produksi_ton);
+
+    if (!reqPos(F.target_produksi_ton)) {
+      errors.push("Target Produksi (Ton) harus > 0.");
+      if (!firstEl) firstEl = elTarget;
+      markInvalid(elTarget, "Wajib lebih dari nol");
+    }
+    const elPremiP = root.querySelector("#inp-premi-panen");
+    if (!reqPos(F.premi_panen)) {
+      errors.push("Premi Panen harus > 0.");
+      if (!firstEl) firstEl = elPremiP;
+      markInvalid(elPremiP, "Wajib lebih dari nol");
+    }
+    const elPremiN = root.querySelector("#inp-premi-non");
+    if (!reqPos(F.premi_non_panen)) {
+      errors.push("Premi Non Panen harus > 0.");
+      if (!firstEl) firstEl = elPremiN;
+      markInvalid(elPremiN, "Wajib lebih dari nol");
+    }
+
+    // Upah HK (disabled tapi tetap wajib ada dan >0)
+    if (!reqPos(F.upah_hk_sku)) {
+      errors.push("Upah HK SKU belum tersedia (> 0) — tarik master yrates.");
+    }
+    if (!reqPos(F.upah_hk_bhl)) {
+      errors.push("Upah HK BHL belum tersedia (> 0) — tarik master yrates.");
+    }
+
+    // Minimal harus ada isi baris HK atau Borongan
+    const hasAnyRow =
+      (Array.isArray(F.hk) && F.hk.length) ||
+      (Array.isArray(F.borongan) && F.borongan.length);
+    if (!hasAnyRow) {
+      errors.push("Tambahkan minimal satu baris HK atau Borongan.");
+    }
+
+    // ===== Detail HK =====
+    (F.hk || []).forEach((it, i) => {
+      const elType = findCellInput("hk", "activity_type", i);
+      const elJob = findCellInput("hk", "pekerjaan", i); // disabled; hanya penanda error
+      const elSat = findCellInput("hk", "satuan", i);
+      const elLuas = findCellInput("hk", "luas_ha", i);
+      const elHK = findCellInput("hk", "hk", i);
+      const elTipe = root.querySelector(
+        `tr[data-row-type="hk"] select[data-sec="hk"][data-k="tipe"][data-i="${i}"]`
+      );
+
+      if (!reqStr(it.activity_type)) {
+        errors.push(`HK baris ${i + 1}: Activity Type wajib diisi.`);
+        if (!firstEl) firstEl = elType;
+        markInvalid(elType, "Wajib diisi");
+      }
+      if (!reqStr(it.pekerjaan)) {
+        errors.push(
+          `HK baris ${i + 1}: Jenis Pekerjaan tidak terbaca dari master.`
+        );
+        if (!firstEl) firstEl = elType || elJob;
+        markInvalid(
+          elJob || elType,
+          "Isi/benarkan Activity Type (nama otomatis)"
+        );
+      }
+      if (!reqStr(it.satuan)) {
+        errors.push(`HK baris ${i + 1}: Satuan wajib diisi.`);
+        if (!firstEl) firstEl = elSat;
+        markInvalid(elSat, "Wajib diisi");
+      }
+      if (!reqPos(it.luas_ha)) {
+        errors.push(`HK baris ${i + 1}: Luas harus > 0.`);
+        if (!firstEl) firstEl = elLuas;
+        markInvalid(elLuas, "Wajib > 0");
+      }
+      if (!reqPos(it.hk)) {
+        errors.push(`HK baris ${i + 1}: HK harus > 0.`);
+        if (!firstEl) firstEl = elHK;
+        markInvalid(elHK, "Wajib > 0");
+      }
+      if (!reqStr(it.tipe)) {
+        errors.push(`HK baris ${i + 1}: Tipe HK wajib (SKU/BHL).`);
+        if (!firstEl) firstEl = elTipe;
+        markInvalid(elTipe, "Pilih tipe");
+      }
+      if (!reqPos(it.total_rp)) {
+        // total dihitung otomatis; kalau 0 kemungkinan upah 0 atau hk 0
+        errors.push(`HK baris ${i + 1}: Total (Rp) masih 0 — cek Upah/HK.`);
+        // tak perlu mark: sudah ditandai di komponen penyebab
+      }
+    });
+
+    // ===== Detail BORONGAN =====
+    (F.borongan || []).forEach((it, i) => {
+      const elType = findCellInput("bor", "activity_type", i);
+      const elJob = findCellInput("bor", "pekerjaan", i); // disabled; hanya penanda error
+      const elSat = findCellInput("bor", "satuan", i);
+      const elQty = findCellInput("bor", "qty", i);
+      const elTar = findCellInput("bor", "tarif_borongan", i);
+
+      if (!reqStr(it.activity_type)) {
+        errors.push(`Borongan baris ${i + 1}: Activity Type wajib diisi.`);
+        if (!firstEl) firstEl = elType;
+        markInvalid(elType, "Wajib diisi");
+      }
+      if (!reqStr(it.pekerjaan)) {
+        errors.push(
+          `Borongan baris ${i + 1}: Jenis Pekerjaan tidak terbaca dari master.`
+        );
+        if (!firstEl) firstEl = elType || elJob;
+        markInvalid(
+          elJob || elType,
+          "Isi/benarkan Activity Type (nama otomatis)"
+        );
+      }
+      if (!reqStr(it.satuan)) {
+        errors.push(`Borongan baris ${i + 1}: Satuan wajib diisi.`);
+        if (!firstEl) firstEl = elSat;
+        markInvalid(elSat, "Wajib diisi");
+      }
+      if (!reqPos(it.qty)) {
+        errors.push(`Borongan baris ${i + 1}: Qty harus > 0.`);
+        if (!firstEl) firstEl = elQty;
+        markInvalid(elQty, "Wajib > 0");
+      }
+      if (!reqPos(it.tarif_borongan)) {
+        errors.push(`Borongan baris ${i + 1}: Tarif Borongan harus > 0.`);
+        if (!firstEl) firstEl = elTar;
+        markInvalid(elTar, "Wajib > 0");
+      }
+      if (!reqPos(it.total_rp)) {
+        errors.push(
+          `Borongan baris ${i + 1}: Total (Rp) masih 0 — cek Qty/Tarif.`
+        );
+      }
+    });
+
+    if (errors.length) {
+      U.alert(`Periksa kembali isian Anda:\n\n• ${errors.join("\n• ")}`);
+      U.toast("Validasi gagal. Periksa bidang yang ditandai.", "danger");
+      if (firstEl) {
+        try {
+          firstEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        } catch (_) {}
+        try {
+          firstEl.focus();
+        } catch (_) {}
+      }
+      return false;
+    }
+    return true;
+  }
 
   async function onSaveDraft() {
     if (!validateBeforeSave()) return;
 
+    // VALIDASI: 1 RKB ⇔ 1 PDO
+    if (String(F.ref_rkb || "").trim()) {
+      // cek draft lain (selain yg sedang diedit)
+      const arrDraft = U.S.get("kpl.actual.pdo_draft", []) || [];
+      const dupLocal = arrDraft.some(
+        (x) =>
+          _lc(x.ref_rkb) === _lc(F.ref_rkb) && _lc(x.nomor) !== _lc(F.nomor)
+      );
+      if (dupLocal) {
+        U.alert(
+          `RKB ${F.ref_rkb} sudah dipakai oleh PDO lain (draft). Hapus/ubah dulu PDO tersebut.`
+        );
+        return;
+      }
+      // cek actuals lokal (hasil pull server)
+      const candHdr = ["pdo", "pdo_header", "pdo_headers", "pdo_list"];
+      let dupServer = false;
+      for (const k of candHdr) {
+        const v = STORE?.getActual?.(k);
+        if (
+          Array.isArray(v) &&
+          v.some((x) => _lc(x.ref_rkb || "") === _lc(F.ref_rkb))
+        ) {
+          dupServer = true;
+          break;
+        }
+      }
+      if (dupServer) {
+        U.alert(
+          `RKB ${F.ref_rkb} sudah memiliki PDO di server. Tidak boleh duplikat.`
+        );
+        return;
+      }
+    }
     const arr = U.S.get("kpl.actual.pdo_draft", []);
     const idx = arr.findIndex((x) => String(x.nomor) === String(F.nomor));
     if (idx >= 0) arr[idx] = F;
@@ -1480,8 +1985,8 @@ if (!reqPos(F.target_produksi_ton)) {
 
     bindRatesIfEmpty();
     await preloadFromRKB();
-    (F.hk||[]).forEach(r => backfillActivityFromName(r, false));
-(F.borongan||[]).forEach(r => backfillActivityFromName(r, true));
+    (F.hk || []).forEach((r) => backfillActivityFromName(r, false));
+    (F.borongan || []).forEach((r) => backfillActivityFromName(r, true));
     recomputeTotals();
     render();
 

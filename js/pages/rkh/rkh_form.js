@@ -116,6 +116,30 @@ function stashRkbActualsFromServerPayload(payload){
   return fPeriode(s);
 }
 
+// === PATCH: helper lokasi seragam → array of {type,name,luas} ===
+function normalizeLokasi(raw, masters={blok:M.blok, komplek:M.komplek}) {
+  // Sudah array objek?
+  if (Array.isArray(raw) && raw.length && typeof raw[0] === 'object') {
+    return raw.map(l => ({ type: _str(l.type||''), name: _str(l.name||l.kode||l), luas: _num(l.luas)||undefined }));
+  }
+  // String "A1, A2" → pecah
+  const arr = _str(raw).split(',').map(s => s.trim()).filter(Boolean);
+  // coba deteksi dari master blok/komplek utk dapatkan luas
+  const idxBlok   = new Map((masters.blok||[]).map(b => [String(b.kode).toLowerCase(), _num(b.luas_ha)]));
+  const idxKompl  = new Map((masters.komplek||[]).map(k => [String(k.kode).toLowerCase(), _num(k.luas_ha||k.luas)]));
+  return arr.map(nm => {
+    const key = nm.toLowerCase();
+    const luasBlok  = idxBlok.get(key);
+    const luasKompl = idxKompl.get(key);
+    return {
+      type: (luasBlok!=null && !isNaN(luasBlok)) ? 'blok' : ((luasKompl!=null && !isNaN(luasKompl)) ? 'komplek' : ''),
+      name: nm,
+      luas: (luasBlok!=null && !isNaN(luasBlok)) ? luasBlok :
+            (luasKompl!=null && !isNaN(luasKompl)) ? luasKompl : undefined
+    };
+  });
+}
+
 // ====== RKH NUMBERING (Asia/Jakarta) ======
 function _tzPartsWIB(d = new Date()) {
   // ambil komponen waktu WIB secara aman
@@ -1261,52 +1285,81 @@ async function warmRkbActualsAll(){
         </table>`;
       U.qs("#list", div).querySelectorAll("button[data-n]").forEach((b) => {
         b.onclick = async () => {
-          try {
+            try {
             const nomor = b.dataset.n;
+            // Ambil detail RKH SUMBER (tanggal di modal hanya untuk memilih sumber)
             const det = await getRkhDetailPreferLocal(nomor);
-            const its = Array.isArray(det.items) ? det.items : [];
-            const bhn = Array.isArray(det.bahan) ? det.bahan : [];
+            const hdr = det?.header || {};
+            const its = Array.isArray(det?.items) ? det.items : [];
+            const bhn = Array.isArray(det?.bahan) ? det.bahan : [];
+
+            // Index bahan per item_idx
             const bahanByIdx = {};
             (bhn || []).forEach((x) => {
-              const k = _str(x.item_idx || x.idx);
-              (bahanByIdx[k] = bahanByIdx[k] || []).push({
+                const k = _str(x.item_idx || x.idx);
+                (bahanByIdx[k] = bahanByIdx[k] || []).push({
                 nama: _str(x.nama),
                 no_material: _str(x.no_material ?? x.kode ?? x.code ?? x.id ?? x.no),
                 jumlah: _num(x.jumlah),
                 satuan: _str(x.satuan),
-              });
+                });
             });
-            F.nomor = ""; F.ref_rkb = "";
+
+            // === Draft BARU ===
+            F.nomor   = "";                // auto generate
+            // AMBIL Ref. No RKB dari header sumber jika ada
+            const refFromSrc = _str(hdr.ref_rkb || hdr.rkb_nomor || hdr.no_rkb || "");
+            if (refFromSrc) {
+                F.ref_rkb = refFromSrc;
+            } else {
+                // tidak ada di sumber → biarkan apa adanya (tidak dihapus)
+                // F.ref_rkb = F.ref_rkb;
+            }
+
+            // Tanggal RKH mengikuti tanggal yang ada di FORM (jangan diubah di sini)
+            setPeriodeFromTanggal();       // sinkronkan periode dari F.tanggal form
+
+            // Scope user aktif
+            F.divisi_id   = DIVISI_ID;
+            F.estate_id   = ESTATE_ID;
+            F.rayon_id    = RAYON_ID;
+            F.divisi      = DIVISI;
+            F.estate_full = ESTATE;
+
+            // Map items → format form
             F.items = (its || []).map((x, i) => {
-              const lokasiArr = _str(x.lokasi)
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean)
-                .map((nm) => ({ type: "", name: nm, luas: undefined }));
-              const it = {
-                pekerjaan: x.pekerjaan || "",
-                activity_type: x.activity_type || "",
+                const lokasiArr = normalizeLokasi(x.lokasi);
+                const it = {
+                pekerjaan: _str(x.pekerjaan||""),
+                activity_type: _str(x.activity_type||""),
                 lokasi: lokasiArr,
-                volume: _num(x.volume),
-                satuan: _str(x.satuan || ""),
+                volume: (_num(x.volume) > 0) ? _num(x.volume)
+                        : lokasiArr.reduce((a,b)=> a + (_num(b.luas)||0), 0),
+                satuan: _str(x.satuan||"Ha"),
                 hk_unit: _num(x.hk_unit),
                 pct_bhl: _num(x.pct_bhl),
                 pct_sku: _num(x.pct_sku),
                 pct_bhb: _num(x.pct_bhb),
-                pengawas: _str(x.pengawas || ""),
+                pengawas: _str(x.pengawas||""),
                 bahan: bahanByIdx[_str(x.idx || i + 1)] || [],
-              };
-              it.hk = computeHK(it);
-              return it;
+                };
+                it.hk = computeHK(it);
+                return it;
             });
+
+            // Generate nomor RKH baru agar langsung tampil
+            ensureNomorRkhIfEmpty('clone-from-date');
+
             saveBufferThin();
-            U.toast("Draft dibuat dari RKH sebelumnya.", "success");
+            build();
+            U.toast("Draft RKH baru dibuat dari RKH sumber. Tanggal mengikuti form, Ref. No RKB ikut sumber.", "success");
             m.hide(); setTimeout(() => div.remove(), 150);
-          } catch (e) {
+            } catch (e) {
             U.toast(e.message || e, "danger");
-          }
+            }
         };
-      });
+        });
+
     }
 
     U.qs("#btn-load", div).onclick = loadList;

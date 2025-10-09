@@ -839,47 +839,194 @@ ${sections.join('\n')}
 
 
   // ===== Copy RKB dari periode → periode lain =====
-  function copyPeriode(){
-    if(!data.length){ U.toast('Belum ada draft untuk dicopy.','warning'); return; }
-    const src = prompt('Copy dari periode (YYYY-MM):', periodeFilter || '');
-    if(!src) return;
-    const dst = prompt('Ke periode (YYYY-MM):', src);
-    if(!dst) return;
+/* === Copy Periode: gabungkan sumber dari Draft + Actuals === */
 
-    // ambil sumber di SEMUA draft (bukan outbox)
-    const allDrafts = U.S.get(draftKey, []);
-    const srcRows = (allDrafts||[]).filter(x => fPeriode(x.periode) === String(src));
-    if(!srcRows.length){ U.toast('Tidak ada RKB dengan periode sumber.','warning'); return; }
+// Normalisasi Draft dari localStorage (periode -> YYYY-MM)
+function readDraftsNormalized() {
+  const rows = U.S.get('rkb.drafts', []) || [];
+  return rows.map(r => ({ ...r, periode: fPeriode(r.periode) }));
+}
 
-    // klon → reset nomor & status
+// Ambil RKB dari actuals server yang "punya" user aktif, lalu normalisasi bentuknya
+async function readActualsMineNormalized(){
+  try{
+    if (typeof STORE?.ensureWarm === 'function') {
+      await STORE.ensureWarm();
+    }
+  }catch(_){}
+
+  const me = (SESSION.profile()?.username || '').toLowerCase();
+  // Prefer helper khusus bila ada; fallback ke getActual('rkb')
+  const arr = (STORE?.getActualsRkb && STORE.getActualsRkb())
+           || (STORE?.getActual && (STORE.getActual('rkb') || []))
+           || [];
+
+  const mine = arr.filter(x => String(x.username||'').toLowerCase() === me);
+
+  return mine.map(x => ({
+    nomor      : x.nomor,
+    periode    : fPeriode(x.periode),
+    divisi     : x.divisi || '',
+    estate_full: x.estate_full || '',
+    status     : x.status || 'submitted',
+    hk_total   : Number(x.hk_total||0),
+    created_at : x.created_at || '',
+    updated_at : x.updated_at || '',
+    __history  : true,    // penanda sumber server (read-only)
+    items      : []       // akan di-inflate saat cloning jika kosong
+  }));
+}
+
+// Gabungkan pool sumber (Draft + Actuals), unik berdasarkan nomor
+async function readSourcePoolNormalized(){
+  const drafts  = readDraftsNormalized();
+  const actuals = await readActualsMineNormalized();
+
+  const used = new Set(drafts.map(r => String(r.nomor)));
+  const extra = actuals.filter(r => !used.has(String(r.nomor)));
+  return drafts.concat(extra);
+}
+
+// === Ganti handler tombol “Copy Periode” lama ===
+function copyPeriode(){
+  openCopyPeriodeModal();
+}
+
+// Modal Copy Periode: pilih periode sumber (gabungan) + target via input-month
+async function openCopyPeriodeModal(){
+  const pool = await readSourcePoolNormalized();
+  if(!pool.length){
+    U.toast('Belum ada data RKB (draft/actuals) untuk disalin.', 'warning');
+    return;
+  }
+
+  // daftar periode unik dari gabungan sumber
+  const perList = Array.from(new Set(pool.map(x => fPeriode(x.periode)).filter(Boolean)))
+    .sort()
+    .reverse();
+
+  const defaultSrc = (typeof periodeFilter !== 'undefined' && periodeFilter && perList.includes(String(periodeFilter)))
+    ? String(periodeFilter)
+    : (perList[0] || '');
+
+  const div = document.createElement('div');
+  div.className = 'modal fade';
+  div.innerHTML = `
+  <div class="modal-dialog modal-md">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Copy Periode RKB</h5>
+        <button class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Dari Periode</label>
+          <select id="cp-src" class="form-select">
+            ${perList.map(p => `<option value="${p}" ${p===defaultSrc?'selected':''}>${p}</option>`).join('')}
+          </select>
+          <div class="form-text">Sumber diambil dari Draft & Actuals (server cache) milik user ini.</div>
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Ke Periode</label>
+          <input id="cp-dst" type="month" class="form-control" />
+          <div class="form-text">Gunakan picker agar format selalu benar (YYYY-MM).</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+        <button id="cp-do" class="btn btn-primary">Salin</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(div);
+  const m = new bootstrap.Modal(div);
+  m.show();
+
+  const selSrc = div.querySelector('#cp-src');
+  const inpDst = div.querySelector('#cp-dst');
+  const setDstFromSrc = ()=> { try{ inpDst.value = String(selSrc.value); }catch(_){} };
+  setDstFromSrc();
+  selSrc.addEventListener('change', setDstFromSrc);
+
+  div.querySelector('#cp-do').onclick = async ()=>{
+    const src = fPeriode(selSrc.value);
+    const dst = fPeriode(inpDst.value);
+
+    if(!src){ U.toast('Periode sumber belum dipilih.','warning'); return; }
+    if(!dst || !/^\d{4}-\d{2}$/.test(dst)){ U.toast('Periode tujuan tidak valid.','warning'); return; }
+
+    // Ambil baris sumber dari POOL gabungan
+    const srcRows = pool.filter(x => fPeriode(x.periode) === src);
+    if(!srcRows.length){ U.toast('Tidak ada RKB pada periode sumber (Draft/Actuals).','warning'); return; }
+
+    // Siapkan basis draft eksisting
+    const draftsNow = readDraftsNormalized();
+
+    // Clone semua baris sumber -> jadikan Draft baru pada periode tujuan
     const now = Date.now();
-    const clones = srcRows.map((r,idx)=>{
-      const t = new Date(now+idx*1000);
-      const yy=String(t.getFullYear()).slice(-2);
-      const mm=String(t.getMonth()+1).padStart(2,'0');
-      const dd=String(t.getDate()).padStart(2,'0');
-      const hh=String(t.getHours()).padStart(2,'0');
-      const mi=String(t.getMinutes()).padStart(2,'0');
-      const ss=String(t.getSeconds()).padStart(2,'0');
-      // nomor baru (unik)
-      const divCode = String(r.divisi||'').replace(/\s+/g,'').toUpperCase();
+    const clones = [];
+    for (let i=0; i<srcRows.length; i++){
+      const r = srcRows[i];
+
+      // nomor unik baru
+      const t  = new Date(now + i*1000);
+      const yy = String(t.getFullYear()).slice(-2);
+      const mm = String(t.getMonth()+1).padStart(2,'0');
+      const dd = String(t.getDate()).padStart(2,'0');
+      const hh = String(t.getHours()).padStart(2,'0');
+      const mi = String(t.getMinutes()).padStart(2,'0');
+      const ss = String(t.getSeconds()).padStart(2,'0');
+      const divCode   = String(r.divisi||'').replace(/\s+/g,'').toUpperCase();
       const nomorBaru = `RKB${divCode}${yy}${mm}${dd}${hh}${mi}${ss}`;
-      return {
-        ...JSON.parse(JSON.stringify(r)),
-        nomor: nomorBaru,
-        periode: dst,
-        status: 'draft',
-        hk_total: Number(r.hk_total||0),
+
+      // deep clone
+      const clone = JSON.parse(JSON.stringify(r));
+
+      // inflate items bila kosong (kasus sumber dari actuals)
+      if(!(Array.isArray(clone.items) && clone.items.length) && typeof itemsFromActuals === 'function'){
+        try{
+          const its = await itemsFromActuals(r.nomor);
+          if(Array.isArray(its) && its.length){ clone.items = its; }
+        }catch(_){}
+      }
+
+      // bersih-bersih flag server-only
+      delete clone.__history;
+      delete clone.__serverLinked;
+      delete clone.last_error;
+
+      clones.push({
+        ...clone,
+        nomor     : nomorBaru,
+        periode   : fPeriode(dst),
+        status    : 'draft',
+        hk_total  : Number(clone.hk_total||0),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
-      };
-    });
+      });
+    }
 
-    const merged = clones.concat(allDrafts);
-    U.S.set(draftKey, merged);
-    if(which==='draft'){ data = merged; sortData(data); build(); }
-    U.toast(`Tersalin ${clones.length} RKB ke periode ${dst}.`,'success');
-  }
+    // Simpan (clone di depan supaya muncul teratas)
+    const merged = clones.concat(draftsNow);
+    U.S.set('rkb.drafts', merged);
+
+    // Refresh tampilan list
+    try{
+      if (typeof sortData === 'function') {
+        data = merged.map(r => ({...r, periode: fPeriode(r.periode)}));
+        sortData(data);
+      }
+      if (typeof renderRows === 'function') renderRows();
+      if (typeof renderPager === 'function') renderPager();
+    }catch(_){}
+
+    U.toast(`Tersalin ${clones.length} RKB dari ${src} ke ${dst}.`,'success');
+    m.hide();
+  };
+
+  div.addEventListener('hidden.bs.modal', ()=> div.remove(), { once:true });
+}
+
 
   // ===== Template ikon sederhana (unicode, tak perlu lib eksternal) =====
   const ICON = {
@@ -1424,6 +1571,11 @@ function fPeriode(p){
   const y = new Intl.DateTimeFormat('id-ID', { timeZone: tz, year: 'numeric' }).format(d);
   const m = new Intl.DateTimeFormat('id-ID', { timeZone: tz, month: '2-digit' }).format(d);
   return `${y}-${m}`;
+}
+
+function readDraftsNormalized() {
+  const rows = U.S.get('rkb.drafts', []) || [];
+  return rows.map(r => ({ ...r, periode: fPeriode(r.periode) }));
 }
 
   // go

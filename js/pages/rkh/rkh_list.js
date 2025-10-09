@@ -1127,116 +1127,188 @@ function normalizeBahanForExport(bahan){
   }));
 }
 
+// format ke dd/MM/yy-HH:mm:ss (Asia/Jakarta). Input boleh ISO, epoch, atau string lain.
+function fmtWIB(ts){
+  if(!ts) return '';
+  let d = ts instanceof Date ? ts : new Date(ts);
+  if(isNaN(d)) return String(ts); // biarkan apa adanya bila tidak parseable
+  const tz = 'Asia/Jakarta';
+  const dd = new Intl.DateTimeFormat('id-ID',{timeZone:tz,day:'2-digit'}).format(d);
+  const mm = new Intl.DateTimeFormat('id-ID',{timeZone:tz,month:'2-digit'}).format(d);
+  const yy = new Intl.DateTimeFormat('id-ID',{timeZone:tz,year:'2-digit'}).format(d);
+  const hh = new Intl.DateTimeFormat('id-ID',{timeZone:tz,hour:'2-digit',hour12:false}).format(d);
+  const mi = new Intl.DateTimeFormat('id-ID',{timeZone:tz,minute:'2-digit'}).format(d);
+  const ss = new Intl.DateTimeFormat('id-ID',{timeZone:tz,second:'2-digit'}).format(d);
+  return `${dd}/${mm}/${yy}-${hh}:${mi}:${ss}`;
+}
 
-  // ===== Export Excel (one sheet per RKH) =====
-  function colLetter(n){
-    let s=''; n = n + 1;
-    while(n>0){ let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
-    return s;
-  }
-  async function exportXlsx(){
+    // ===== Export Excel (one sheet per RKH) =====
+function colLetter(n){
+  let s=''; n = n + 1;
+  while(n>0){ let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); }
+  return s;
+}
+
+async function exportXlsx(){
   if (typeof XLSX === 'undefined'){ U.toast('Library XLSX belum tersedia.','warning'); return; }
   const arr = applyFilter(); if(!arr.length){ U.toast('Tidak ada data untuk diekspor.','warning'); return; }
 
   const wb = XLSX.utils.book_new();
+
   for (let idx=0; idx<arr.length; idx++){
-  const r = arr[idx];
-  let items = (r._raw?.items)||[];
-let bahan = (r._raw?.bahan)||[];
+    const r = arr[idx];
 
-// Inflate bila kosong dari actual STORE
-if(!(items && items.length)){
-  const det = await detailFromActuals(r.nomor);
-  items = det.items; bahan = det.bahan;
-}else if(!(bahan && bahan.length)){
-  const det = await detailFromActuals(r.nomor);
-  if(det.bahan && det.bahan.length) bahan = det.bahan;
-}
+    // --- Ambil detail ---
+    let items = (r._raw?.items)||[];
+    let bahan = (r._raw?.bahan)||[];
+    if(!(items && items.length)){
+      const det = await detailFromActuals(r.nomor);
+      items = det.items; bahan = det.bahan;
+    }else if(!(bahan && bahan.length)){
+      const det = await detailFromActuals(r.nomor);
+      if(det.bahan && det.bahan.length) bahan = det.bahan;
+    }
 
-// <<< NORMALISASI ketika source berasal dari form (lokasi array, idx kosong, hk_* belum ada)
-items = normalizeItemsForExport(items);
-bahan = normalizeBahanForExport(bahan);
+    // --- Normalisasi ---
+    items = normalizeItemsForExport(items);
+    bahan = normalizeBahanForExport(bahan);
 
-const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
+    // --- Header org ---
+    const EST_NAME = (r.estate_full || '').toUpperCase();
+    const PT_NAME  = (COMPANY_NAME || 'PT -').toUpperCase();
 
-  const headerBlock = [
-    ['RENCANA KERJA HARIAN'],
-    [`Tanggal: ${fmtDateWIB_ddMMyyyy(r.tanggal)}`],
-    [`Periode: ${r.periode||'-'}`, `Divisi: ${r.divisi||'-'}`],
-    [`No. RKH: ${r.nomor||'-'}`, `Ref. RKB: ${(r._raw?.header?.ref_rkb)||'-'}`],
-    [],
-    DETAIL_HEADERS
-  ];
-  const detailData = rows.map(o => DETAIL_HEADERS.map(h => o[h]));
-  const aoa = headerBlock.concat(detailData);
+    // --- Flatten untuk sheet ---
+    const { DETAIL_HEADERS: DH, rows } = flattenRkhRows(r._raw?.header||{}, items, bahan);
 
-  // >>> Deklarasi sign sebelum dipakai
-  let sign = { asisten: '' };
-  try{
-    sign = await resolveSignersByContext({
-      estate_id: r.estate_id,
-      rayon_id : r.rayon_id,
-      divisi_id: r.divisi_id,
-      divisi   : r.divisi,
-      estate_full: r.estate_full
-    }) || { asisten: '' };
-  }catch(_){}
+    const headerBlock = [
+      [PT_NAME],                              // Baris 1: Nama PT
+      [EST_NAME],                             // Baris 2: Nama Estate
+      ['RENCANA KERJA HARIAN'],               // Baris 3: Judul
+      [`Tanggal: ${fmtDateWIB_ddMMyyyy(r.tanggal)}`],
+      [`Periode: ${r.periode||'-'}`],
+      [`Divisi: ${r.divisi||'-'}`],
+      [`No. RKH: ${r.nomor||'-'}`],
+      [`Ref. RKB: ${(r._raw?.header?.ref_rkb)||'-'}`],
+      [],
+      DH                                      // Baris header kolom detail
+    ];
 
-  // Tanda tangan Asisten
-  aoa.push([]);
-  aoa.push(['Asisten']);
-  aoa.push([ signerLine(sign.asisten) ]);
+    const detailData = rows.map(o => DH.map(h => o[h]));
+    const aoa = headerBlock.concat(detailData);
 
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // --- Penandatangan (Asisten) ---
+    let sign = { asisten: '' };
+    try{
+      sign = await resolveSignersByContext({
+        estate_id: r.estate_id,
+        rayon_id : r.rayon_id,
+        divisi_id: r.divisi_id,
+        divisi   : r.divisi,
+        estate_full: r.estate_full
+      }) || { asisten: '' };
+    }catch(_){}
 
-    // wrap kolom multiline
-    const WRAP_HEADERS = ['Lokasi','No. Material','Nama Bahan','Sat. Bahan'];
-    const wrapIdx = WRAP_HEADERS.map(h => DETAIL_HEADERS.indexOf(h)).filter(i=>i>=0);
-    const dataStart = headerBlock.length + 1; // 1-based
+    aoa.push([]);
+    aoa.push(['Asisten']);
+    aoa.push([ signerLine(sign.asisten) ]);
+
+    // --- Buat sheet ---
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+    // ==== Hitung rentang data detail (untuk wrap & total) ====
+    const hdrRows   = headerBlock.length;        // baris sebelum data detail dimulai
+    const dataStart = hdrRows + 1;               // 1-based
     const dataEnd   = dataStart + (detailData.length||0) - 1;
-    const colLetter = (n)=>{ let s=''; n=n+1; while(n>0){let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26);} return s; };
+
+    // ==== TOTAL BHL/SKU/BHB (baris di bawah detail) ====
+    if (detailData.length){
+      const A = (n)=>{ let s=''; n=n+1; while(n>0){let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26);} return s; };
+      const totRow = dataEnd + 1;
+
+      // Label "TOTAL" di kolom F (HK/Unit)
+      const labelAddr = `${A(5)}${totRow}`;  // F = index 5 (0-based)
+      ws[labelAddr] = Object.assign({}, ws[labelAddr]||{}, { t:'s', v:'TOTAL', s:{ font:{ bold:true } } });
+
+      // SUM untuk kolom G,H,I → BHL, SKU, BHB (index 6,7,8)
+      [6,7,8].forEach(ci => {
+        const addr = `${A(ci)}${totRow}`;
+        ws[addr] = Object.assign({}, ws[addr]||{}, {
+          t:'n',
+          f:`SUM(${A(ci)}${dataStart}:${A(ci)}${dataEnd})`,
+          s:{ font:{ bold:true } }
+        });
+      });
+    }
+
+    // ==== MERGE & STYLE 3 BARIS ATAS (PT, ESTATE, JUDUL) ====
+    const lastColIdx = DH.length - 1;
+    ws['!merges'] = (ws['!merges']||[]).concat([
+      { s:{r:0,c:0}, e:{r:0,c:lastColIdx} },   // baris 1
+      { s:{r:1,c:0}, e:{r:1,c:lastColIdx} },   // baris 2
+      { s:{r:2,c:0}, e:{r:2,c:lastColIdx} },   // baris 3
+    ]);
+
+    const A = (n)=>{ let s=''; n=n+1; while(n>0){let r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26);} return s; };
+    const A1 = `${A(0)}1`, A2 = `${A(0)}2`, A3 = `${A(0)}3`;
+    ws[A1] = ws[A1] || { t:'s', v:PT_NAME };
+    ws[A2] = ws[A2] || { t:'s', v:EST_NAME };
+    ws[A3] = ws[A3] || { t:'s', v:'RENCANA KERJA HARIAN' };
+
+    ws[A1].s = Object.assign({}, ws[A1].s||{}, { font:{ bold:true, sz:14 }, alignment:{ horizontal:'left' } });
+    ws[A2].s = Object.assign({}, ws[A2].s||{}, { font:{ bold:false, sz:12 }, alignment:{ horizontal:'left' } });
+    ws[A3].s = Object.assign({}, ws[A3].s||{}, { font:{ bold:true, sz:13 }, alignment:{ horizontal:'left' } });
+
+    // ==== Wrap untuk kolom multiline ====
+    const WRAP_HEADERS = ['Lokasi','No. Material','Nama Bahan','Sat. Bahan'];
+    const wrapIdx = WRAP_HEADERS.map(h => DH.indexOf(h)).filter(i=>i>=0);
     for(const ci of wrapIdx){
       const col = colLetter(ci);
       for(let rr=dataStart; rr<=dataEnd; rr++){
-        const addr = `${col}${rr}`; if(ws[addr]){
+        const addr = `${col}${rr}`;
+        if(ws[addr]){
           ws[addr].s = Object.assign({}, ws[addr].s||{}, { alignment:{ wrapText:true, vertical:'top' } });
         }
       }
     }
+
+    // ==== Lebar kolom ====
     ws['!cols'] = [
       {wch:10},{wch:24},{wch:22},{wch:12},{wch:8},{wch:10},
       {wch:10},{wch:10},{wch:10},{wch:14},{wch:24},{wch:10},{wch:10},{wch:16}
     ];
 
+    // ==== Append sheet ====
     let sname = (r.nomor||`RKH${idx+1}`).replace(/[\\/?*\[\]]/g,'');
     if(sname.length>31) sname = sname.slice(-31);
     XLSX.utils.book_append_sheet(wb, ws, sname || `RKH${idx+1}`);
   }
+
   XLSX.writeFile(wb, `RKH_Detail_${periodeFilter||'ALL'}.xlsx`);
 }
+
 
   // ===== Cetak PDF (one page per RKH) =====
   async function printPdf(){
   const arr = applyFilter(); if(!arr.length){ U.toast('Tidak ada data untuk dicetak.','warning'); return; }
 
-  const sections = await Promise.all(arr.map(async (r)=>{
-  let items = (r._raw?.items)||[];
-let bahan = (r._raw?.bahan)||[];
+    const sections = await Promise.all(arr.map(async (r)=>{
+    let items = (r._raw?.items)||[];
+    let bahan = (r._raw?.bahan)||[];
 
-// Inflate bila kosong dari actual STORE
-if(!(items && items.length)){
-  const det = await detailFromActuals(r.nomor);
-  items = det.items; bahan = det.bahan;
-}else if(!(bahan && bahan.length)){
-  const det = await detailFromActuals(r.nomor);
-  if(det.bahan && det.bahan.length) bahan = det.bahan;
-}
+    // Inflate bila kosong dari actual STORE
+    if(!(items && items.length)){
+    const det = await detailFromActuals(r.nomor);
+    items = det.items; bahan = det.bahan;
+    }else if(!(bahan && bahan.length)){
+    const det = await detailFromActuals(r.nomor);
+    if(det.bahan && det.bahan.length) bahan = det.bahan;
+    }
 
-// <<< NORMALISASI ketika source berasal dari form (lokasi array, idx kosong, hk_* belum ada)
-items = normalizeItemsForExport(items);
-bahan = normalizeBahanForExport(bahan);
+    // <<< NORMALISASI ketika source berasal dari form (lokasi array, idx kosong, hk_* belum ada)
+    items = normalizeItemsForExport(items);
+    bahan = normalizeBahanForExport(bahan);
 
-const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
+    const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
 
   // >>> PENTING: deklarasikan sign DI SINI (dalam callback dan sebelum dipakai)
   let sign = { asisten: '' };
@@ -1270,11 +1342,35 @@ const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
     </tr>
   `).join('');
 
+  // Totalkan dari rows (obj map "BHL","SKU","BHB")
+    const tBHL = rows.reduce((a,o)=> a + Number(o['BHL']||0), 0);
+    const tSKU = rows.reduce((a,o)=> a + Number(o['SKU']||0), 0);
+    const tBHB = rows.reduce((a,o)=> a + Number(o['BHB']||0), 0);
+
+    const footerRow = `
+    <tfoot>
+        <tr class="total">
+        <td class="t-right" colspan="6"><b>TOTAL</b></td>
+        <td class="num t-right"><b>${U.fmt.id2(tBHL)}</b></td>
+        <td class="num t-right"><b>${U.fmt.id2(tSKU)}</b></td>
+        <td class="num t-right"><b>${U.fmt.id2(tBHB)}</b></td>
+        <td colspan="5"></td>
+        </tr>
+    </tfoot>`;
+
+
   const refRkb = (r._raw?.header?.ref_rkb)||'-';
+  const signedAt =
+  r._raw?.header?.created_at || r.created_at ||
+  r._raw?.header?.updated_at || r.updated_at || '';
   return `
   <section class="page">
     <div class="hdr">
       <div class="hdr-left">
+        <div class="org">
+            <div class="pt">${(COMPANY_NAME||'PT -').toUpperCase()}</div>
+            <div class="est">${(r.estate_full||'').toUpperCase()}</div>
+        </div>
         <div class="title">RENCANA KERJA HARIAN</div>
         <table class="meta">
           <tr><td>Tanggal</td><td>:</td><td>${fmtDateWIB_ddMMyyyy(r.tanggal)}</td></tr>
@@ -1288,9 +1384,9 @@ const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
       <table class="signbox">
         <tr><th>Dibuat</th></tr>
         <tr><td class="nm">${(sign.asisten||'ASISTEN').toUpperCase()}</td></tr>
-        <tr><td class="lbl" style="height:46px;">TTD:</td></tr>
-        <tr><td class="role">${signerLine(sign.asisten)}</td></tr>
-      </table>
+        <tr><td class="lbl">TTD:<br>${signedAt ? (fmtWIB(signedAt)) : '' || '&nbsp;'}</td></tr>
+        <tr><td class="role">ASISTEN</td></tr>
+    </table>
     </div>
 
     <table class="grid">
@@ -1327,6 +1423,7 @@ const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
         </tr>
       </thead>
       <tbody>${bodyRows || `<tr><td colspan="14" class="muted">Tidak ada detail.</td></tr>`}</tbody>
+${rows.length ? footerRow : ''}
     </table>
 
     <div class="printed">Dicetak: ${new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta', dateStyle:'medium', timeStyle:'short'}).format(new Date())}</div>
@@ -1346,12 +1443,42 @@ const {DETAIL_HEADERS, rows} = flattenRkhRows(r._raw?.header||{}, items, bahan);
   .meta{ border-collapse:collapse; font-size:12px; }
   .meta td{ padding:1px 4px; }
 
-  .signbox{ border-collapse:collapse; width:240px; table-layout:fixed; font-size:12px; }
-  .signbox th, .signbox td{ border:1px solid #000; padding:6px 8px; vertical-align:top; }
-  .signbox th{ text-align:center; font-weight:700; background:#f4f4f4; }
-  .signbox .nm{ height:28px; font-weight:700; text-align:center; }
-  .signbox .lbl{ height:38px; text-align:center; }
-  .signbox .role{ text-align:center; }
+  /* Sign box (kanan atas) */
+  /* Kotak tanda tangan (kanan atas) */
+.signbox{ border-collapse:collapse; width:260px; table-layout:fixed; font-size:12px; }
+.signbox th, .signbox td{ border:1px solid #000; padding:8px 10px; vertical-align:middle; }
+.signbox th{ text-align:center; font-weight:700; background:#f4f4f4; }
+
+/* Nama pembuat */
+.signbox .nm{
+  text-align:center; font-weight:700; letter-spacing:.2px;
+  padding:14px 10px;
+}
+
+/* Area TTD + timestamp */
+.signbox .lbl{ text-align:center; padding:8px 10px 10px; }
+.signbox .lbl .ttd{ margin-bottom:6px; }         /* tulisan "TTD:" */
+.signbox .lbl .ts{
+  display:block;
+  width:88%;                /* panjang garis (atur sesuai selera: 80–95%) */
+  margin:0 auto;            /* center */
+  padding-bottom:4px;       /* supaya garis tepat di bawah angka */
+  border-bottom:2px solid #000;  /* GARIS PENUH di bawah timestamp */
+  line-height:1.25;
+  font-weight:600;
+}
+
+/* Jabatan di bawah */
+.signbox .role{ text-align:center; font-weight:700; padding:8px 10px; }
+
+
+  .org { margin:0 0 6px 0; }
+  .org .pt  { font-size:14px; font-weight:700; letter-spacing:.2px; }
+  .org .est { font-size:12px; font-weight:600; margin-top:2px; }
+  .title    { font-size:16px; font-weight:700; margin:6px 0 8px 0; letter-spacing:.3px; }
+
+  .grid tfoot td{ border:1px solid #000; padding:6px 6px; font-size:11px; }
+  .grid tr.total td{ background:#f2f2f2; font-weight:700; }
 
   .grid{ width:100%; border-collapse:collapse; table-layout:fixed; }
   .grid th, .grid td{ border:1px solid #000; padding:6px 6px; font-size:11px; vertical-align:top; }

@@ -46,6 +46,44 @@ function resolveDivisi(any){
 
   return {};
 }
+// ==== Utils umum (gunakan jika belum ada di file terkait) ====
+function _lc(v){ return (v==null?'':String(v)).trim().toLowerCase(); }
+function _pick(o, keys){
+  for(const k of keys){ if(o && o[k]!=null && String(o[k]).trim()!=='') return o[k]; }
+  return '';
+}
+// Normalisasi periode ke "YYYY-MM"
+function _toYYYYMM(p){
+  const s = String(p||'').trim();
+  if (/^\d{4}-\d{2}$/.test(s)) return s;
+  const d = new Date(s); if (isNaN(d)) return s;
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  return `${y}-${m}`;
+}
+// Ambil koleksi RKB Header dari localStorage terlebih dahulu, fallback ke STORE.getActual(...)
+function _collectRKBHeaders(){
+  const viaUS = U.S.get('kpl.actual.rkb', []) || [];
+  if (Array.isArray(viaUS) && viaUS.length) return viaUS;
+
+  // fallback umum yang sering dipakai backend
+  const cand = ['rkb','rkb_header','rkb_headers','rkb_list','kpl.actual.rkb'];
+  for(const k of cand){
+    const v = STORE?.getActual?.(k);
+    if (Array.isArray(v) && v.length) return v;
+  }
+  return [];
+}
+// Ambil field nomor/identitas RKB secara toleran
+function _rkbNomor(row){
+  return String(_pick(row, ['nomor','no_rkb','rkb_no','kode','id','no'] )||'').trim();
+}
+function _rkbPeriode(row){
+  return _toYYYYMM(_pick(row, ['periode','period','bulan','month']));
+}
+function _rkbEstate(row){ return String(_pick(row, ['estate_id','estate','id_estate'] )||'').trim(); }
+function _rkbRayon(row){  return String(_pick(row, ['rayon_id','rayon','id_rayon'] )||'').trim(); }
+function _rkbDivisi(row){ return String(_pick(row, ['divisi_id','divisi','divisi_kode','kd_divisi'] )||'').trim(); }
 
 function labelDivisi(any, mode='smart'){
   const d = resolveDivisi(any);
@@ -909,6 +947,7 @@ async function viewRow(nomor){
         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
           <h4 class="mb-0">${which==='outbox'?'Outbox':'Draft PDO'}</h4>
           <div class="d-flex flex-wrap gap-2">
+            <button id="btn-new-pdo" class="btn btn-sm btn-danger">Buat PDO Baru</button>
             <button id="btn-xlsx" class="btn btn-sm btn-success">Export Excel</button>
             <button id="btn-pdf"  class="btn btn-sm btn-dark">Cetak PDF</button>
           </div>
@@ -962,6 +1001,7 @@ async function viewRow(nomor){
       </div></div>
     `;
 
+    U.qs('#btn-new-pdo').onclick = openNewPdoModal;
     U.qs('#btn-xlsx').onclick = exportXlsx;
     U.qs('#btn-pdf').onclick  = printPdf;
 
@@ -972,6 +1012,166 @@ async function viewRow(nomor){
 
     renderRows(); renderPager(); updateInfo();
   }
+
+  // ==== Modal Buat PDO Baru (dari RKB) ====
+// render modal sekali
+(function ensureNewPdoModal(){
+  if (document.getElementById('pdo-new-modal')) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+<div class="modal fade" id="pdo-new-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Buat PDO Baru (Pilih RKB)</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label class="form-label">Cari RKB</label>
+          <input id="npdo-q" class="form-control" placeholder="ketik nomor/periode/divisi..." />
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead><tr>
+              <th style="width:40px">#</th>
+              <th>No. RKB</th>
+              <th>Periode</th>
+              <th>Divisi</th>
+              <th>Estate</th>
+              <th>Rayon</th>
+              <th style="width:90px">Aksi</th>
+            </tr></thead>
+            <tbody id="npdo-rows"><tr><td colspan="7" class="text-muted">Memuat...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="small text-muted" id="npdo-info"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Tutup</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+  document.body.appendChild(wrap.firstElementChild);
+})();
+
+function _pdoHasRefRkb(ref){
+  if(!ref) return false;
+  // 1) Draft lokal
+  const drafts = (getDrafts()||[]);
+  if (drafts.some(x => _lc(x.ref_rkb) === _lc(ref))) return true;
+
+  // 2) Actuals lokal (hasil pull server)
+  const list = STORE.getActual?.(PDO_ACT_KEYS.header) || [];
+  if (Array.isArray(list) && list.some(x => _lc(x.ref_rkb||'') === _lc(ref))) return true;
+
+  return false;
+}
+
+function _pdoRefBadge(ref){
+  return _pdoHasRefRkb(ref)
+    ? `<span class="badge rounded-pill text-bg-warning ms-1" title="RKB ini sudah memiliki PDO">Sudah ada PDO</span>`
+    : '';
+}
+
+function _newPdoSeedFromRkb(row){
+  const ref = _rkbNomor(row);
+  return {
+    nomor: '', // akan diisi oleh pdo_form.js saat dibuka
+    ref_rkb: ref,
+    periode: _rkbPeriode(row),
+    estate_id: _rkbEstate(row),
+    rayon_id:  _rkbRayon(row),
+    divisi_id: _rkbDivisi(row),
+    upah_hk_bhl: 0, upah_hk_sku: 0, premi_panen: 0, premi_non_panen: 0,
+    target_produksi_ton: 0,
+    hk: [], borongan: [],
+    created_ts: null, askep_ts: null, manager_ts: null,
+    status: 'draft'
+  };
+}
+
+function _renderRkbTable(rows){
+  const tb = document.getElementById('npdo-rows');
+  const info = document.getElementById('npdo-info');
+  if(!rows.length){
+    tb.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Tidak ada RKB.</td></tr>`;
+    info.textContent = '';
+    return;
+  }
+  tb.innerHTML = rows.map((r,i)=>{
+    const no  = _rkbNomor(r);
+    const per = _rkbPeriode(r);
+    const div = _rkbDivisi(r);
+    const est = _rkbEstate(r);
+    const ray = _rkbRayon(r);
+    const disabled = _pdoHasRefRkb(no) ? 'disabled' : '';
+    return `<tr>
+      <td>${i+1}</td>
+      <td>${no} ${_pdoRefBadge(no)}</td>
+      <td>${per||'-'}</td>
+      <td>${div||'-'}</td>
+      <td>${est||'-'}</td>
+      <td>${ray||'-'}</td>
+      <td><button class="btn btn-sm btn-danger" data-newpdo="${no}" ${disabled}>Pilih</button></td>
+    </tr>`;
+  }).join('');
+  info.textContent = `Menampilkan ${rows.length} RKB.`;
+  tb.querySelectorAll('button[data-newpdo]').forEach(b=>{
+    b.onclick = ()=> onPickRkbForNewPdo(String(b.dataset.newpdo));
+  });
+}
+
+function openNewPdoModal(){
+  const all = _collectRKBHeaders();
+  // urutkan terbaru di atas berdasarkan periode + nomor
+  const rows = (all||[]).slice().sort((a,b)=>{
+    const pa = _rkbPeriode(a), pb = _rkbPeriode(b);
+    return String(pb).localeCompare(String(pa)) || _rkbNomor(b).localeCompare(_rkbNomor(a));
+  });
+
+  const modalEl = document.getElementById('pdo-new-modal');
+  const m = bootstrap?.Modal ? new bootstrap.Modal(modalEl) : null;
+  _renderRkbTable(rows);
+  if(m) m.show();
+
+  const q = document.getElementById('npdo-q');
+  q.value = '';
+  q.oninput = ()=>{
+    const s = _lc(q.value);
+    const filtered = rows.filter(r=>{
+      return [_rkbNomor(r), _rkbPeriode(r), _rkbDivisi(r), _rkbEstate(r), _rkbRayon(r)]
+        .some(v => _lc(v).includes(s));
+    });
+    _renderRkbTable(filtered);
+  };
+}
+
+function onPickRkbForNewPdo(nomorRkb){
+  // Validasi unik: kalau sudah ada PDO, blok
+  if (_pdoHasRefRkb(nomorRkb)){
+    U.alert('Setiap No. RKB hanya boleh memiliki 1 PDO.\nRKB terpilih sudah memiliki PDO.');
+    return;
+  }
+  // Bangun seed dari sumber RKB
+  const row = (_collectRKBHeaders()||[]).find(x => _rkbNomor(x) === nomorRkb);
+  if(!row){ U.alert('RKB tidak ditemukan di lokal.'); return; }
+
+  const seed = _newPdoSeedFromRkb(row);
+
+  // Simpan buffer untuk form & buka form (read/write)
+  U.S.set('pdo.form.buffer', seed);
+  U.S.del('pdo.form.readonly');
+  location.hash = '#/pdo/form';
+
+  // tutup modal jika ada
+  try{
+    const modalEl = document.getElementById('pdo-new-modal');
+    const inst = bootstrap.Modal.getInstance(modalEl);
+    if(inst) inst.hide();
+  }catch(_){}
+}
 
   function renderRows(){
     const arr = applyFilter();
