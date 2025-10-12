@@ -128,6 +128,49 @@ Pages.rkbForm = function(){
     return '';
   }
 
+
+  // === API adapter (pakai yang ada di project Anda, fallback ke fetch) ===
+const BACKEND_URL = window.BACKEND_URL || window.API_URL || ''; // kalau sudah ada global, pakai itu
+async function apiPost(action, payload){
+  if (window.API?.post) return window.API.post(action, payload);            // adapter project
+  if (window.U?.api?.post) return window.U.api.post(action, payload);        // adapter lain (kalau ada)
+  // fallback fetch
+  const token = SESSION.token?.() || '';
+  const res = await fetch(BACKEND_URL || '/exec', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action, token, ...payload})
+  });
+  return res.json();
+}
+
+// === Helpers sinkron ke backend ===
+// Lokasi → string "A,B,C" (backend menyimpan di kolom 'lokasi' sebagai gabungan)
+function lokasiToString(list){
+  const arr = Array.isArray(list) ? list : [];
+  return arr.map(x => (x?.name || x)?.toString().trim()).filter(Boolean).join(',');
+}
+
+// Ambil no_material & satuan default bahan dari master (sudah ada: getBahanMetaByName), ini guard ekstra:
+function ensureBahanHasNoMaterial(b){
+  const meta = getBahanMetaByName(b?.nama);
+  return {
+    nama   : _str(b?.nama),
+    jumlah : _num(b?.jumlah),
+    satuan : _str(b?.satuan) || _str(meta?.satuan_default),
+    no_material: _str(b?.no_material || meta?.no_material)
+  };
+}
+
+// Cek apakah nomor RKB sudah ada di actuals (server) → untuk konfirmasi Replace
+function existsOnServerByNomor(nomor){
+  try{
+    const rows = (window.STORE && STORE.getActual) ? (STORE.getActual('rkb')||[]) : [];
+    return rows.some(r => _str(r.nomor) === _str(nomor));
+  }catch(_){ return false; }
+}
+
+
   // ========== Draft dari server → isi items dari actuals jika kosong ==========
   hydrateFromActualsIfNeeded();
   function hydrateFromActualsIfNeeded(){
@@ -147,9 +190,11 @@ Pages.rkbForm = function(){
       (bahanByIdx[k] = bahanByIdx[k] || []).push({
         nama: _str(b.nama),
         jumlah: _num(b.jumlah),
-        satuan: _str(b.satuan)
+        satuan: _str(b.satuan),
+        no_material: _str(b.no_material) // ← ambil dari actuals
       });
     });
+
 
     F.items = rowsI.map(r=>{
       const lokasiArr = _str(r.lokasi).split(',').map(s=>s.trim()).filter(Boolean)
@@ -333,8 +378,15 @@ Pages.rkbForm = function(){
       <h5 class="mb-2">Daftar Pekerjaan (${totalItems} item)</h5>
       <div id="items-table" class="table-responsive mb-3"></div>
 
-      <div class="d-flex gap-2">
+      <div class="d-flex flex-wrap gap-2">
         <button id="btn-save-draft" class="btn btn-success">Simpan Draft</button>
+        <button id="btn-submit" class="btn btn-danger">
+          ${ existsOnServerByNomor(F.nomor) ? 'Replace ke Server' : 'Submit ke Server' }
+        </button>
+      </div>
+      <div class="form-text mt-1">
+        Submit akan <strong>mengirim ulang seluruh item</strong> ke server (Full Replace). 
+        Jika nomor sudah pernah dikirim, detail lama akan <em>diganti</em>.
       </div>
     </div></div>`;
 
@@ -377,6 +429,16 @@ Pages.rkbForm = function(){
     U.qs('#btn-clear-item').onclick = ()=>{ CUR = defaultItem(); build(); };
 
     U.qs('#btn-save-draft').onclick = saveDraft;
+
+    const btnSubmit = U.qs('#btn-submit');
+  if (btnSubmit){
+    btnSubmit.onclick = async ()=>{
+      // jaga nomor & periode valid
+      const errH = validateHeaderStrict(); if(errH){ U.toast(errH,'warning'); return; }
+      await submitRKB();
+    };
+  }
+
   }
 
   function updateHKLive(){
@@ -731,6 +793,109 @@ Pages.rkbForm = function(){
 
     U.toast('Draft RKB disimpan.','success');
   }
+
+
+  // === Bangun payload sesuai backend pushRKB (Full Replace: header + items lengkap) ===
+function buildPushPayload(){
+  // Validasi header + setiap item (pakai validator yang sudah ada)
+  const errH = validateHeaderStrict(); if(errH) throw new Error(errH);
+  if(!(F.items?.length)) throw new Error('Minimal 1 item pekerjaan.');
+
+  const row = {
+    nomor: _str(F.nomor),
+    periode: fPeriode(F.periode),
+    // scope id harus ada (backend juga akan backfill, tapi kita lengkapi di FE)
+    plant_id: '',                         // opsional (akan diisi server bila ada)
+    estate_id: _str(F.estate_id || ESTATE_ID),
+    rayon_id:  _str(F.rayon_id  || RAYON_ID),
+    divisi_id: _str(F.divisi_id || DIVISI_ID),
+    estate_full: _str(F.estate_full || ESTATE_LABEL),
+    // digital signature Asisten saat submit (backend pakai row.created_ts || sigWIB())
+    created_ts: (function sigWIB(d=new Date()){
+      const tz="Asia/Jakarta";
+      const dd=new Intl.DateTimeFormat("id-ID",{timeZone:tz,day:"2-digit"}).format(d);
+      const mm=new Intl.DateTimeFormat("id-ID",{timeZone:tz,month:"2-digit"}).format(d);
+      const yy=new Intl.DateTimeFormat("id-ID",{timeZone:tz,year:"2-digit"}).format(d).slice(-2);
+      const hh=new Intl.DateTimeFormat("id-ID",{timeZone:tz,hour:"2-digit",hour12:false}).format(d);
+      const mi=new Intl.DateTimeFormat("id-ID",{timeZone:tz,minute:"2-digit"}).format(d);
+      const ss=new Intl.DateTimeFormat("id-ID",{timeZone:tz,second:"2-digit"}).format(d);
+      return `${dd}/${mm}/${yy}-${hh}:${mi}:${ss}`;
+    })()
+  };
+
+  // Map item → struktur backend:
+  const items = (F.items||[]).map((it, idx) => {
+    const errI = validateItemStrict(it); if(errI) throw new Error(`Item #${idx+1}: ${errI}`);
+
+    // pastikan bahan valid + punya no_material
+    const listBhn = (it.bahan||[]).map(ensureBahanHasNoMaterial);
+    const eB = validateBahanList(listBhn); if(eB) throw new Error(`Item #${idx+1}: ${eB}`);
+
+    return {
+      pekerjaan    : _str(it.pekerjaan),
+      activity_type: _str(it.activity_type),
+      lokasi       : lokasiToString(it.lokasi),
+      volume       : _num(it.volume),
+      satuan       : _str(it.satuan),
+      hk_unit      : _num(it.hk_unit),
+      pct_bhl      : _num(it.pct_bhl),
+      pct_sku      : _num(it.pct_sku),
+      pct_bhb      : _num(it.pct_bhb),
+      pengawas     : _str(it.pengawas),
+      bahan        : listBhn
+    };
+  });
+
+  return { row, items };
+}
+
+// === Submit/Replace ke server ===
+async function submitRKB(){
+  try{
+    const payload = buildPushPayload();
+
+    // Konfirmasi Full Replace bila nomor sudah ada di server
+    const already = existsOnServerByNomor(payload.row.nomor);
+    if (already){
+      const ok = confirm(
+        `No RKB ${payload.row.nomor} sudah ada di server.\n`+
+        `SUBMIT ini akan MENGGANTI SELURUH detail pada nomor tersebut (Full Replace).\n\n`+
+        `Lanjutkan?`
+      );
+      if(!ok) return;
+    }
+
+    U.loading?.show?.(); // kalau project punya loader
+    const res = await apiPost('pushRKB', payload);
+    U.loading?.hide?.();
+
+    if(!res?.ok){
+      U.toast?.(res?.error || 'Gagal submit RKB', 'danger');
+      return;
+    }
+
+    // Mark buffer & draft sebagai "server linked"
+    F.__serverLinked = true;
+    F.status = 'submitted';
+    F.status_label = 'submitted';
+    F.updated_at = new Date().toISOString();
+    U.S.set('rkb.form.buffer', F);
+
+    // Hapus draft lokal yang sama (opsi, supaya tidak bingung)
+    const drafts = U.S.get('rkb.drafts', []) || [];
+    U.S.set('rkb.drafts', drafts.filter(d => _str(d.nomor)!==_str(F.nomor)));
+
+    U.toast?.('RKB berhasil dikirim. Menunggu Approval Askep.', 'success');
+
+    // Opsional: arahkan ke daftar / tarik ulang actuals
+    // location.hash = '#/rkb/list'; // jika ada halaman list
+    // window.Pages?.home?.pullAll?.(); // jika punya tombol "Tarik Master & Data Aktual"
+  }catch(err){
+    U.loading?.hide?.();
+    U.toast?.(String(err.message || err), 'danger');
+  }
+}
+
 
   // ====== Create PDO Draft dari RKB (tetap disertakan seperti versi Anda) ======
   function createPdoDraftFromRkb(rkb){

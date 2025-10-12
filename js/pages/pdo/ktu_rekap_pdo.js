@@ -1,34 +1,49 @@
 // js/pages/pdo/ktu_rekap_pdo.js
+// ===============================================================
+// Rekap PDO untuk KTU
+// - Local-first (cache header + cache detail per nomor)
+// - Filter: Periode, Estate, Rayon, Divisi, Status
+// - Tabel rekap menampilkan kolom Status setelah No. PDO
+// - Export Excel & Cetak PDF selalu menggunakan data yang DIFILTER
+// ===============================================================
 window.Pages = window.Pages || {};
 Pages.ktuRekapPDO = async function(){
   const root = U.qs('#app-root');
   const profile = SESSION.profile();
-  if(!profile){ location.hash = '#/login'; return; }
+  if (!profile) { location.hash = '#/login'; return; }
 
-  // ===== [GUARD: WAJIB DATA HANGAT] =====
+  // -------------------------------------------------------------
+  // 0) WARM DATA GUARD
+  // -------------------------------------------------------------
   const ok = await U.requireWarmOrRedirect({
     mastersNeeded: ['ydivisi','yrayon','yestate'],
-    actualsNeeded: [] // rekap PDO pakai header PDO + masters
+    actualsNeeded: [] // rekap header PDO saja
   });
-  if(!ok){
+  if (!ok) {
     root.innerHTML = `<div class="alert alert-warning">Menunggu Tarik Master & Data Aktual...</div>`;
     return;
   }
 
-  // ===== Cache lokal =====
-  const ACT_KEY = 'kpl.actual.ktu_rekap_pdo';
-  const getCache = ()=> U.S.get(ACT_KEY, []) || [];
-  const setCache = (rows)=> U.S.set(ACT_KEY, rows||[]);
+  // -------------------------------------------------------------
+  // 1) KONST & CACHE KEYS
+  // -------------------------------------------------------------
+  const ACT_KEY_HEADER = 'kpl.actual.ktu_rekap_pdo';     // cache header rekap (array rows)
+  const ACT_KEY_DETAIL = 'kpl.cache.pdo_detail.map';     // cache detail per nomor (map)
 
-  // ===== Masters =====
+  // -------------------------------------------------------------
+  // 2) MASTERS
+  // -------------------------------------------------------------
   const M = {
     ydivisi: STORE.getMaster('ydivisi') || [],
     yrayon:  STORE.getMaster('yrayon')  || [],
     yestate: STORE.getMaster('yestate') || []
   };
 
-  // ===== Helpers =====
+  // -------------------------------------------------------------
+  // 3) UTIL (formatting & helpers)
+  // -------------------------------------------------------------
   const lc = (v)=> (v==null ? '' : String(v).trim().toLowerCase());
+
   const fmt = {
     idr: (n)=> (U.fmt && typeof U.fmt.idr === 'function') ? U.fmt.idr(n) : Number(n||0).toLocaleString('id-ID'),
     id0: (n)=> (U.fmt && typeof U.fmt.id0 === 'function') ? U.fmt.id0(n) : Number(n||0).toLocaleString('id-ID'),
@@ -52,23 +67,87 @@ Pages.ktuRekapPDO = async function(){
     }
   };
 
-  // ==== Ambil label dari master (fleksibel ke berbagai skema kolom) ====
-  function estateRowById(id){
-    return (M.yestate||[]).find(e => String(e.id)===String(id)) || {};
+  // ---- Status normalizer (sesuai permintaan)
+  function normalizeStatus(raw) {
+    if (!raw) return 'UNKNOWN';
+    let s = String(raw).trim().toLowerCase();
+    if (s.startsWith('draft ')) s = 'draft';
+    switch (s) {
+      case 'draft':            return 'DRAFT';
+      case 'submitted':        return 'SUBMITTED';
+      case 'askep_approved':   return 'ASKEP_APPROVED';
+      case 'partial_approved': return 'PARTIAL_APPROVED';
+      case 'full_approved':    return 'FULL_APPROVED';
+      case 'rejected':         return 'REJECTED';
+      default:                 return 'UNKNOWN';
+    }
   }
-  function rayonRowById(id){
-    return (M.yrayon||[]).find(e => String(e.id)===String(id)) || {};
-  }
-  function divisiRowById(id){
-    return (M.ydivisi||[]).find(e => String(e.id)===String(id)) || {};
-  }
+
+
+  // === [DROP-IN PATCH] Normalisasi header agar divisi selalu terisi konsisten ===
+function normalizeHeaders(arr){
+  return (arr||[]).map(r=>{
+    // Ambil kunci divisi dari beberapa kemungkinan kolom
+    const divKeyRaw = r.divisi_id || r.divisi || r.div || '';
+    return {
+      nomor       : r.nomor,
+      periode     : fmt.periodeYM(r.periode),
+      // Simpan apa adanya (bisa id/kode/nama) → akan ditangani oleh filter & label
+      divisi_id   : divKeyRaw,
+      rayon_kode  : r.rayon_kode || '',
+      estate_nama : r.estate_nama || '',
+      total_rp    : Number(r.total_rp||0),
+      status      : normalizeStatus(r.status || r.raw_status || r.state)
+    };
+  });
+}
+
+// === [DROP-IN PATCH] Helper label divisi yang robust (id/kode/nama) ===
+function labelDivisiFromAny(val){
+  const v = String(val||'').trim();
+  if(!v) return '-';
+  const vLc = lc(v);
+  const found = (M.ydivisi||[]).find(d=>{
+    const idMatch   = String(d.id||'') === v;
+    const kodeMatch = lc(d.kode ?? d.kd_divisi ?? '') === vLc;
+    const namaMatch = lc(d.nama||'') === vLc;
+    return idMatch || kodeMatch || namaMatch;
+  });
+  return found ? (found.nama || found.kode || found.id || '-') : (v || '-');
+}
+
+// Kompatibilitas: biarkan pemanggilan lama tetap jalan.
+function labelDivisiFromKode(kode){ return labelDivisiFromAny(kode); }
+
+// === [DROP-IN PATCH] Filter Divisi: cocokkan ke id/kode/nama (dua arah) ===
+function passDivisi(row){
+  if(!filters.divisi_id) return true;
+
+  // Ambil baris master untuk divisi yang dipilih user (berdasarkan ID value dropdown)
+  const d = (M.ydivisi||[]).find(e => String(e.id)===String(filters.divisi_id));
+  if(!d) return true;
+
+  // Kumpulan kandidat nilai dari master (yang mungkin muncul di data header)
+  const cand = new Set([
+    lc(d.id),
+    lc(d.kode ?? d.kd_divisi ?? ''),
+    lc(d.nama||'')
+  ].filter(Boolean));
+
+  // Nilai divisi yang datang dari header (bisa id/kode/nama)
+  const rowVal = lc(row.divisi_id || row.divisi || row.div || '');
+
+  // Lolos jika cocok salah satu
+  return cand.has(rowVal);
+}
+
+  // ---- Master lookups
+  const estateRowById = (id)=> (M.yestate||[]).find(e => String(e.id)===String(id)) || {};
+  const rayonRowById  = (id)=> (M.yrayon||[]).find (e => String(e.id)===String(id)) || {};
+  const divisiRowById = (id)=> (M.ydivisi||[]).find(e => String(e.id)===String(id)) || {};
   function divisiRowByKode(kode){
     const k = lc(kode);
     return (M.ydivisi||[]).find(d => lc(d.kode ?? d.kd_divisi ?? '') === k) || {};
-  }
-  function labelDivisiFromKode(kode){
-    const d = divisiRowByKode(kode);
-    return d ? (d.nama || d.kode || kode || '-') : (kode || '-');
   }
   function labelRayonFromKode(kode){
     const k = lc(kode);
@@ -76,31 +155,27 @@ Pages.ktuRekapPDO = async function(){
     return r ? (r.nama || r.kode || r.kd_rayon || '-') : (kode || '-');
   }
 
-  // ==== Penandatangan (ambil dari master jika ada; aman bila kosong) ====
+  // ---- Signers (fallback aman)
   function signerFromMasters({ estate_id, rayon_id, divisi_id }){
     const est = estateRowById(estate_id);
     const ray = rayonRowById(rayon_id);
     const div = divisiRowById(divisi_id);
-
-    const get = (row, ...keys)=> {
+    const pick = (row, ...keys)=> {
       for(const k of keys){
         if(row && row[k]!=null && String(row[k]).trim()!=='') return String(row[k]);
       }
       return '';
     };
-
     return {
-      company: get(est, 'plant_nama','company_name','nama_company','plant_name','plant') || 'BUANA TUNAS SEJAHTERA',
-      estateFull: get(est, 'nama_panjang','nama','estate_nama','nama_estate'),
-      manager: get(est, 'manager','manager_nama','nama_mgr'),
-      ktu:     get(est, 'ktu','ktu_nama','nama_ktu'),
-      askep:   get(ray, 'askep','askep_nama','nama_askep'),
-      asisten: get(div, 'nama_asisten','asisten','asisten_nama','nama_ast','pic')
+      company: pick(est, 'plant_nama','company_name','nama_company','plant_name','plant') || 'BUANA TUNAS SEJAHTERA',
+      estateFull: pick(est, 'nama_panjang','nama','estate_nama','nama_estate'),
+      manager: pick(est, 'manager','manager_nama','nama_mgr'),
+      ktu:     pick(est, 'ktu','ktu_nama','nama_ktu'),
+      askep:   pick(ray, 'askep','askep_nama','nama_askep'),
+      asisten: pick(div, 'nama_asisten','asisten','asisten_nama','nama_ast','pic')
     };
   }
-
-  // ---- Helper TTD (HTML sel)
-  function sigCell(role, name='', ts=''){
+  const sigCell = (role, name='', ts='')=>{
     const t = ts ? `<div class="muted">TTD: ${ts}</div>` : `<div class="muted">&nbsp;</div>`;
     return `
       <td style="width:25%; text-align:center; vertical-align:bottom; height:90px">
@@ -109,41 +184,73 @@ Pages.ktuRekapPDO = async function(){
         <div style="border-top:1px solid #000; margin-top:36px; padding-top:6px">${name||'Nama Jelas & Ttd'}</div>
         ${t}
       </td>`;
-  }
-  function tableRow(k, v){
-    return `<tr><th style="width:28%; text-align:left">${k}</th><td>${v||'-'}</td></tr>`;
-  }
-
-  // ===== State =====
-  let rows = []; // data dari cache/server (header PDO ringkas)
-  let filters = { 
-    periode: fmt.nextMonthYM(),   // default: bulan depan
-    estate_id:'', 
-    rayon_id:'', 
-    divisi_id:''
   };
+  const tableRow = (k, v)=> `<tr><th style="width:28%; text-align:left">${k}</th><td>${v||'-'}</td></tr>`;
 
-  // ===== Loader (local-first, server fallback) =====
-  async function load(preferLocal=true){
+  // -------------------------------------------------------------
+  // 4) STATE
+  // -------------------------------------------------------------
+  let headers = [];  // data rekap (header ringkas)
+  let filters = {
+    periode : fmt.nextMonthYM(), // default bulan depan
+    status   : '',
+    estate_id: '',
+    rayon_id : '',
+    divisi_id: ''
+  };
+  const STATUS_OPTIONS = [
+    'DRAFT','SUBMITTED','ASKEP_APPROVED','PARTIAL_APPROVED','FULL_APPROVED','REJECTED','UNKNOWN'
+  ];
+
+  // -------------------------------------------------------------
+  // 5) CACHE GET/SET
+  // -------------------------------------------------------------
+  const getHeaderCache = ()=> U.S.get(ACT_KEY_HEADER, []) || [];
+  const setHeaderCache = (rows)=> U.S.set(ACT_KEY_HEADER, rows||[]);
+
+  function _getDetailMap(){ return U.S.get(ACT_KEY_DETAIL, {}) || {}; }
+  function _setDetailMap(map){ try{ U.S.set(ACT_KEY_DETAIL, map||{}); }catch(e){} }
+  const DETAIL_TTL = 3 * 24 * 60 * 60 * 1000; // 3 hari
+
+  function getDetailFromCache(nomor){
+    const map = _getDetailMap();
+    const rec = map && map[String(nomor)];
+    if(!rec) return null;
+    if(DETAIL_TTL > 0 && Date.now() - Number(rec.ts||0) > DETAIL_TTL) return null;
+    return rec;
+  }
+  function setDetailToCache(nomor, header, items){
+    const map = _getDetailMap();
+    map[String(nomor)] = { header: header||{}, items: items||[], ts: Date.now() };
+    _setDetailMap(map);
+  }
+  function clearDetailCache(nomor){
+    if(!nomor){ _setDetailMap({}); return; }
+    const map = _getDetailMap(); delete map[String(nomor)]; _setDetailMap(map);
+  }
+
+  // -------------------------------------------------------------
+  // 6) LOADERS
+  // -------------------------------------------------------------
+  async function loadHeaders(preferLocal=true){
     let openedHere = false;
     try{
       let data = [];
-      if(preferLocal){
-        const cached = getCache();
-        if(Array.isArray(cached) && cached.length) data = cached;
+      if (preferLocal) {
+        const cached = getHeaderCache();
+        if (Array.isArray(cached) && cached.length) data = cached;
       }
-      if(!data.length){
+      if (!data.length) {
         const pm = document.getElementById('progressModal');
         const pmShown = pm && pm.classList.contains('show');
         if(!pmShown){ U.progressOpen('Menyiapkan rekap PDO...'); U.progress(30,'Ambil data (server)'); openedHere = true; }
-
-        const r = await API.call('ktuRekapPDO', {});
+        const r = await API.call('ktuRekapPDO', {}); // server must return minimal header rows
         if(!r.ok) throw new Error(r.error||'Gagal ambil data');
         data = r.rows || [];
-        setCache(data);
+        setHeaderCache(data);
       }
-      rows = normalize(data);
-      render();
+      headers = normalizeHeaders(data);
+      render(); // initial render (build UI)
     }catch(e){
       root.innerHTML = `<div class="alert alert-danger">Gagal memuat rekap PDO: ${e.message||e}</div>`;
     }finally{
@@ -151,19 +258,55 @@ Pages.ktuRekapPDO = async function(){
     }
   }
 
-  // normalisasi: periode → YYYY-MM
-  function normalize(arr){
-    return (arr||[]).map(r=>({
-      nomor: r.nomor,
-      periode: fmt.periodeYM(r.periode),
-      divisi_id: r.divisi_id || '',
-      rayon_kode: r.rayon_kode || '',
-      estate_nama: r.estate_nama || '',
-      total_rp: Number(r.total_rp||0)
-    }));
+  // Ambil detail untuk daftar nomor (cache-first, server fallback per nomor)
+  async function fetchDetailsForPrint(list){
+    const out = [];
+    const needFetch = [];
+    const cachedPart = {};
+
+    for(const it of (list||[])){
+      const nomor = String(it.nomor);
+      const rec = getDetailFromCache(nomor);
+      if(rec){ cachedPart[nomor] = rec; }
+      else   { needFetch.push(nomor); }
+    }
+
+    let opened = false;
+    try{
+      if(needFetch.length){
+        const pm = document.getElementById('progressModal');
+        const pmShown = pm && pm.classList.contains('show');
+        if(!pmShown){ U.progressOpen('Menyiapkan detail PDO...'); opened = true; }
+      }
+
+      for(let i=0;i<needFetch.length;i++){
+        const nomor = needFetch[i];
+        U.progress(20 + Math.round((i/Math.max(1,needFetch.length))*70), `Ambil ${nomor} (${i+1}/${needFetch.length})`);
+        const r = await API.call('getPdoDetail', { nomor });
+        if(r && r.ok){
+          setDetailToCache(nomor, r.header||{}, r.items||[]);
+          cachedPart[nomor] = { header:r.header||{}, items:r.items||[], ts: Date.now() };
+        }else{
+          setDetailToCache(nomor, { nomor, error:true }, []);
+          cachedPart[nomor] = { header:{ nomor, error:true }, items:[], ts: Date.now() };
+        }
+      }
+    } finally {
+      if(opened){ U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250); }
+    }
+
+    for(const it of (list||[])){
+      const nomor = String(it.nomor);
+      const rec = cachedPart[nomor];
+      if(rec) out.push({ header: rec.header||{}, items: rec.items||[] });
+      else    out.push({ header:{ nomor, error:true }, items:[] });
+    }
+    return out;
   }
 
-  // ===== Filter util =====
+  // -------------------------------------------------------------
+  // 7) FILTER LOGIC
+  // -------------------------------------------------------------
   function passEstate(row){
     if(!filters.estate_id) return true;
     const est = (M.yestate||[]).find(e=> String(e.id)===String(filters.estate_id));
@@ -178,109 +321,24 @@ Pages.ktuRekapPDO = async function(){
     const kode = lc(r.kode ?? r.kd_rayon ?? r.kode_rayon ?? '');
     return lc(row.rayon_kode) === kode;
   }
-  function passDivisi(row){
-    if(!filters.divisi_id) return true;
-    const d = (M.ydivisi||[]).find(e=> String(e.id)===String(filters.divisi_id));
-    if(!d) return true;
-    const kode = lc(d.kode ?? d.kd_divisi ?? '');
-    return lc(row.divisi_id) === kode;
-  }
   function passPeriode(row){
     if(!filters.periode) return true;
     return String(row.periode) === String(filters.periode);
   }
-  function filtered(){ return rows.filter(r => passPeriode(r) && passEstate(r) && passRayon(r) && passDivisi(r)); }
-
-  // ===== Cache detail per PDO (localStorage) =====
-// Struktur: { [nomorPDO]: { header:{...}, items:[...], ts: <epoch ms> } }
-const ACT_KEY_PDO_DETAIL = 'kpl.cache.pdo_detail.map';
-
-function _getDetailMap(){
-  return U.S.get(ACT_KEY_PDO_DETAIL, {}) || {};
-}
-function _setDetailMap(map){
-  try{ U.S.set(ACT_KEY_PDO_DETAIL, map||{}); }catch(e){}
-}
-
-// optional: masa berlaku cache detail (ms). Misal 3 hari
-const DETAIL_TTL = 3 * 24 * 60 * 60 * 1000;
-
-function getDetailFromCache(nomor){
-  const map = _getDetailMap();
-  const rec = map && map[String(nomor)];
-  if(!rec) return null;
-  // cek kedaluwarsa
-  if(DETAIL_TTL > 0 && Date.now() - Number(rec.ts||0) > DETAIL_TTL){
-    return null;
+  function passStatus(row){
+    if(!filters.status) return true; // '' = semua
+    return String(row.status) === String(filters.status);
   }
-  return rec;
-}
-function setDetailToCache(nomor, header, items){
-  const map = _getDetailMap();
-  map[String(nomor)] = { header: header||{}, items: items||[], ts: Date.now() };
-  _setDetailMap(map);
-}
-
-// opsional: hapus 1 nomor atau semua
-function clearDetailCache(nomor){
-  if(!nomor){ _setDetailMap({}); return; }
-  const map = _getDetailMap(); delete map[String(nomor)]; _setDetailMap(map);
-}
-
-// ===== Ambil detail PDO (local-first, server fallback per nomor) =====
-async function fetchDetailsForPrint(list){
-  const out = [];
-  const total = list.length || 1;
-  let opened = false;
-
-  // persiapkan daftar yang sudah ada di cache dan yang belum
-  const needFetch = [];
-  const cachedPart = {};
-  for(const it of (list||[])){
-    const nomor = String(it.nomor);
-    const rec = getDetailFromCache(nomor);
-    if(rec){ cachedPart[nomor] = rec; }
-    else   { needFetch.push(nomor); }
+  function filtered(){
+    // urutkan di akhir untuk tampilan rapi (opsional: by nomor asc)
+    return headers
+      .filter(r => passPeriode(r) && passEstate(r) && passRayon(r) && passDivisi(r) && passStatus(r))
+      .sort((a,b)=> String(a.nomor).localeCompare(String(b.nomor)));
   }
 
-  try{
-    // tampilkan progress hanya jika memang ada yang perlu ke server
-    if(needFetch.length){
-      const pm = document.getElementById('progressModal');
-      const pmShown = pm && pm.classList.contains('show');
-      if(!pmShown){ U.progressOpen('Menyiapkan detail PDO...'); opened = true; }
-    }
-
-    // fetch yang belum ada
-    for(let i=0;i<needFetch.length;i++){
-      const nomor = needFetch[i];
-      U.progress(20 + Math.round((i/Math.max(1,needFetch.length))*70), `Ambil ${nomor} (${i+1}/${needFetch.length})`);
-      const r = await API.call('getPdoDetail', { nomor });
-      if(r && r.ok){
-        setDetailToCache(nomor, r.header||{}, r.items||[]);
-        cachedPart[nomor] = { header:r.header||{}, items:r.items||[], ts: Date.now() };
-      }else{
-        // simpan negatif agar tidak fetch berulang saat gagal (opsional)
-        setDetailToCache(nomor, { nomor, error:true }, []);
-        cachedPart[nomor] = { header:{ nomor, error:true }, items:[], ts: Date.now() };
-      }
-    }
-  } finally {
-    if(opened){ U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 250); }
-  }
-
-  // susun output sesuai urutan list masukan
-  for(const it of (list||[])){
-    const nomor = String(it.nomor);
-    const rec = cachedPart[nomor];
-    if(rec) out.push({ header: rec.header||{}, items: rec.items||[] });
-    else    out.push({ header:{ nomor, error:true }, items:[] }); // fallback mustahil, tapi jaga-jaga
-  }
-  return out;
-}
-
-
-  // ===== Export Excel (rekap) =====
+  // -------------------------------------------------------------
+  // 8) EXPORT & PRINT (memakai data TERFILTER)
+  // -------------------------------------------------------------
   function exportXlsx(){
     const data = filtered();
     if(!data.length){ U.toast('Tidak ada data untuk diekspor.','warning'); return; }
@@ -288,22 +346,23 @@ async function fetchDetailsForPrint(list){
       U.alert('Exporter.exportRekapPDOXlsx belum tersedia (muat js/pages/pdo/exporter.pdo.js).');
       return;
     }
+    // Data sudah termasuk kolom status (Exporter boleh abaikan kolom tak dikenal)
     Exporter.exportRekapPDOXlsx(data);
   }
 
-  // ===== Cetak PDF: Rekap (hal-1) + Detail per PDO (hal-2 dst) =====
   async function printPdf(){
     const data = filtered();
     if(!data.length){ U.toast('Tidak ada data untuk dicetak.','warning'); return; }
 
-    // Ambil header+items setiap PDO untuk halaman detail
+    // Ambil detail untuk halaman 2++
     const details = await fetchDetailsForPrint(data);
 
-    // ------- Halaman 1: REKAP + TTD KTU & Manager -------
+    // REKAP (halaman-1) — kolom STATUS setelah No. PDO
     const grand = data.reduce((a,b)=> a + Number(b.total_rp||0), 0);
     const rowsRekap = data.map(r=>{
       return `<tr>
         <td style="white-space:nowrap">${r.nomor||'-'}</td>
+        <td>${r.status||'-'}</td>
         <td>${r.periode||'-'}</td>
         <td>${labelDivisiFromKode(r.divisi_id)}</td>
         <td>${labelRayonFromKode(r.rayon_kode)}</td>
@@ -312,7 +371,7 @@ async function fetchDetailsForPrint(list){
       </tr>`;
     }).join('');
 
-    // Ambil signer dari data pertama yang tampil (untuk rekap)
+    // Signer ambil dari detail pertama yang tampil
     let signerHead = { manager:'', ktu:'' };
     if(details[0] && details[0].header){
       const h0 = details[0].header;
@@ -328,16 +387,17 @@ async function fetchDetailsForPrint(list){
         <p style="margin:4px 0"><b>Estate:</b> ${(M.yestate.find(e=> String(e.id)==filters.estate_id)?.nama_panjang || 'Semua')}</p>
         <p style="margin:4px 0"><b>Rayon:</b> ${(M.yrayon.find(e=> String(e.id)==filters.rayon_id)?.nama || 'Semua')}</p>
         <p style="margin:4px 0"><b>Divisi:</b> ${(M.ydivisi.find(e=> String(e.id)==filters.divisi_id)?.nama || 'Semua')}</p>
+        <p style="margin:4px 0"><b>Status:</b> ${filters.status || 'Semua'}</p>
       </div>
 
       <table>
         <thead>
           <tr>
-            <th>No. PDO</th><th>Periode</th><th>Divisi</th><th>Rayon</th><th>Estate</th><th class="t-right">Total PDO (Rp)</th>
+            <th>No. PDO</th><th>Status</th><th>Periode</th><th>Divisi</th><th>Rayon</th><th>Estate</th><th class="t-right">Total PDO (Rp)</th>
           </tr>
         </thead>
-        <tbody>${rowsRekap || `<tr><td colspan="6" class="muted">Tidak ada data.</td></tr>`}</tbody>
-        <tfoot><tr><th colspan="5" class="t-right">TOTAL</th><th class="t-right">${fmt.idr(grand)}</th></tr></tfoot>
+        <tbody>${rowsRekap || `<tr><td colspan="7" class="muted">Tidak ada data.</td></tr>`}</tbody>
+        <tfoot><tr><th colspan="6" class="t-right">TOTAL</th><th class="t-right">${fmt.idr(grand)}</th></tr></tfoot>
       </table>
 
       <table style="margin-top:18px"><tr>
@@ -348,29 +408,26 @@ async function fetchDetailsForPrint(list){
       </tr></table>
     `;
 
-    // ------- Halaman 2++ : DETAIL PDO (format “PERMINTAAN DANA OPERASIONAL”) -------
-    const detailPages = details.map((dobj)=>{
+    // DETAIL PDO (halaman-2++)
+    const detailPages = details.map((dobj, idx)=>{
       const h  = dobj.header || {};
       const it = dobj.items  || [];
 
       const estRow = estateRowById(h.estate_id);
-      const divRow = divisiRowByKode(h.divisi_id);
-
       const signer = signerFromMasters({
         estate_id: h.estate_id, rayon_id: h.rayon_id, divisi_id: h.divisi_id
       });
 
-      const company = (signer.company ? `PT. ${String(signer.company).toUpperCase()}` : 'PT. BUANA TUNAS SEJAHTERA');
-      const estateFull = signer.estateFull || estRow.nama_panjang || estRow.nama || '';
+      const company   = (signer.company ? `PT. ${String(signer.company).toUpperCase()}` : 'PT. BUANA TUNAS SEJAHTERA');
+      const estateFull= signer.estateFull || estRow.nama_panjang || estRow.nama || '';
 
-      // pisahkan HK & BOR
       const HK  = it.filter(x=> String(x.tipe_item)==='HK');
       const BOR = it.filter(x=> String(x.tipe_item)==='BOR');
 
-      const totalHK   = HK.reduce((a,b)=> a+Number(b.total_rp||0),0);
-      const totalBor  = BOR.reduce((a,b)=> a+Number(b.total_rp||0),0);
-      const totalPremi= Number(h.premi_panen||0) + Number(h.premi_non_panen||0);
-      const totalPDO  = totalHK + totalBor + totalPremi;
+      const totalHK    = HK.reduce((a,b)=> a+Number(b.total_rp||0),0);
+      const totalBor   = BOR.reduce((a,b)=> a+Number(b.total_rp||0),0);
+      const totalPremi = Number(h.premi_panen||0) + Number(h.premi_non_panen||0);
+      const totalPDO   = totalHK + totalBor + totalPremi;
 
       const rowsHK = HK.map(row=>`
         <tr>
@@ -390,7 +447,6 @@ async function fetchDetailsForPrint(list){
           <td class="t-right">${fmt.idr(row.total_rp||0)}</td>
         </tr>`).join('') || `<tr><td colspan="5" class="muted">Tidak ada pekerjaan borongan.</td></tr>`;
 
-      // blok judul + kotak tanda tangan (Manager/Askep/Asisten) seperti contoh
       const headerBox = `
         <table style="border:none; margin-top:6px"><tr>
           <td style="border:none; padding:0; width:70%">
@@ -401,9 +457,7 @@ async function fetchDetailsForPrint(list){
           </td>
           <td style="border:none; padding:0; width:30%; vertical-align:top">
             <table>
-              <thead>
-                <tr><th>Disetujui</th><th>Diperiksa</th><th>Dibuat</th></tr>
-              </thead>
+              <thead><tr><th>Disetujui</th><th>Diperiksa</th><th>Dibuat</th></tr></thead>
               <tbody>
                 <tr>
                   <td style="text-align:center; height:70px; vertical-align:bottom">
@@ -434,6 +488,7 @@ async function fetchDetailsForPrint(list){
             ${tableRow('Periode', fmt.periodeYM(h.periode))}
             ${tableRow('Divisi',  labelDivisiFromKode(h.divisi_id))}
             ${tableRow('No. PDO', h.nomor)}
+            ${tableRow('Status',  normalizeStatus(h.status||h.raw_status||h.state))}
             ${tableRow('Ref. RKB', h.ref_rkb||'')}
             ${tableRow('Upah HK SKU', `${fmt.idr(h.upah_hk_sku||0)}`)}
             ${tableRow('Upah HK BHL', `${fmt.idr(h.upah_hk_bhl||0)}`)}
@@ -446,8 +501,6 @@ async function fetchDetailsForPrint(list){
         <div style="margin:8px 0">
           <span>Premi Panen : <b>Rp ${fmt.idr(h.premi_panen||0)}</b></span>
           <span style="margin-left:24px">Premi Non Panen : <b>Rp ${fmt.idr(h.premi_non_panen||0)}</b></span>
-          <br/>
-          
         </div>
       `;
 
@@ -473,7 +526,7 @@ async function fetchDetailsForPrint(list){
         </table>
         <div style="margin:8px 0">
           <span>TOTAL PDO: <b>Rp ${fmt.idr(totalPDO)}</b></span>
-          </div>
+        </div>
       `;
 
       return `
@@ -504,18 +557,19 @@ async function fetchDetailsForPrint(list){
   ${detailPages}
   <script>window.print();</script>
 </body></html>`;
-
     const w = window.open('', '_blank'); w.document.write(html); w.document.close();
   }
 
-  // ===== UI =====
+  // -------------------------------------------------------------
+  // 9) UI RENDER
+  // -------------------------------------------------------------
   function render(){
-    // periode options (sertakan default bulan depan)
-    const setPer = new Set(rows.map(r=> r.periode));
+    // Kumpulkan daftar periode untuk dropdown
+    const setPer = new Set(headers.map(r=> r.periode));
     if(filters.periode) setPer.add(filters.periode);
     const periodes = Array.from(setPer).filter(Boolean).sort().reverse();
 
-    // CSS kecil untuk pewarnaan total & hover
+    // CSS kecil: status pill + table vibes
     if(!document.getElementById('ktu-rekap-pdo-css')){
       const s = document.createElement('style');
       s.id = 'ktu-rekap-pdo-css';
@@ -523,6 +577,14 @@ async function fetchDetailsForPrint(list){
         .table tfoot th { background:#f8f9fa; font-weight:700; }
         .table thead th { white-space:nowrap; }
         .table-hover tbody tr:hover { background:#fafbfd; }
+        .status-pill{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:.75rem; font-weight:600; }
+        .st-DRAFT{            background:#fff3cd; color:#856404; }
+        .st-SUBMITTED{        background:#cfe2ff; color:#084298; }
+        .st-ASKEP_APPROVED{   background:#e2e3e5; color:#41464b; }
+        .st-PARTIAL_APPROVED{ background:#fde2cf; color:#7a3e00; }
+        .st-FULL_APPROVED{    background:#d1e7dd; color:#0f5132; }
+        .st-REJECTED{         background:#f8d7da; color:#842029; }
+        .st-UNKNOWN{          background:#e9ecef; color:#495057; }
       `;
       document.head.appendChild(s);
     }
@@ -532,22 +594,29 @@ async function fetchDetailsForPrint(list){
         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
           <h4 class="mb-0">Rekap PDO – KTU</h4>
           <div class="d-flex flex-wrap gap-2">
-            <button id="btn-reload" class="btn btn-sm btn-outline-secondary">Muat Ulang (Server)</button>
-            <button id="btn-xlsx"  class="btn btn-sm btn-success">Export Excel</button>
-            <button id="btn-pdf"   class="btn btn-sm btn-dark">Cetak PDF</button>
+            <button id="btn-reload"  class="btn btn-sm btn-outline-secondary">Muat Ulang (Server)</button>
+            <button id="btn-xlsx"    class="btn btn-sm btn-success">Export Excel</button>
+            <button id="btn-pdf"     class="btn btn-sm btn-dark">Cetak PDF</button>
             <button id="btn-details" class="btn btn-sm btn-outline-primary">Tampilkan Detail di Bawah</button>
           </div>
         </div>
 
         <div class="row g-2 mb-3">
-          <div class="col-sm-3">
+          <div class="col-sm-2">
             <label class="form-label">Periode (YYYY-MM)</label>
             <select id="f-periode" class="form-select form-select-sm">
               <option value="">Semua</option>
               ${periodes.map(p=>`<option value="${p}" ${filters.periode===p?'selected':''}>${p}</option>`).join('')}
             </select>
           </div>
-          <div class="col-sm-3">
+          <div class="col-sm-2">
+            <label class="form-label">Status</label>
+            <select id="f-status" class="form-select form-select-sm">
+              <option value="">Semua</option>
+              ${STATUS_OPTIONS.map(s=> `<option value="${s}" ${filters.status===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div class="col-sm-2">
             <label class="form-label">Estate</label>
             <select id="f-estate" class="form-select form-select-sm">
               <option value="">Semua</option>
@@ -557,7 +626,7 @@ async function fetchDetailsForPrint(list){
               }).join('')}
             </select>
           </div>
-          <div class="col-sm-3">
+          <div class="col-sm-2">
             <label class="form-label">Rayon</label>
             <select id="f-rayon" class="form-select form-select-sm">
               <option value="">Semua</option>
@@ -567,7 +636,7 @@ async function fetchDetailsForPrint(list){
               }).join('')}
             </select>
           </div>
-          <div class="col-sm-3">
+          <div class="col-sm-2">
             <label class="form-label">Divisi</label>
             <select id="f-divisi" class="form-select form-select-sm">
               <option value="">Semua</option>
@@ -584,6 +653,7 @@ async function fetchDetailsForPrint(list){
             <thead class="table-light">
               <tr>
                 <th>No. PDO</th>
+                <th>Status</th>
                 <th>Periode</th>
                 <th>Divisi</th>
                 <th>Rayon</th>
@@ -594,7 +664,7 @@ async function fetchDetailsForPrint(list){
             <tbody id="ktu-rows"></tbody>
             <tfoot>
               <tr>
-                <th colspan="5" class="text-end">TOTAL (yang ditampilkan)</th>
+                <th colspan="6" class="text-end">TOTAL (yang ditampilkan)</th>
                 <th class="text-end" id="ktu-total">0</th>
               </tr>
             </tfoot>
@@ -605,22 +675,23 @@ async function fetchDetailsForPrint(list){
       </div></div>
     `;
 
-    // binds
+    // Bind tombol
     U.qs('#btn-reload').onclick = ()=>{
-  // bersihkan cache header & detail, lalu load dari server
-  U.S.set(ACT_KEY, []);      // header rekap
-  clearDetailCache();        // semua detail PDO
-  load(false);
-};
+      U.S.set(ACT_KEY_HEADER, []); // bersihkan cache header
+      clearDetailCache();          // bersihkan cache detail
+      loadHeaders(false);          // paksa ambil server
+    };
     U.qs('#btn-xlsx').onclick  = exportXlsx;
     U.qs('#btn-pdf').onclick   = printPdf;
 
+    // Bind filter
     U.qs('#f-periode').onchange = (e)=>{ filters.periode   = e.target.value; drawTable(); };
     U.qs('#f-estate').onchange  = (e)=>{ filters.estate_id = e.target.value; drawTable(); };
     U.qs('#f-rayon').onchange   = (e)=>{ filters.rayon_id  = e.target.value; drawTable(); };
     U.qs('#f-divisi').onchange  = (e)=>{ filters.divisi_id = e.target.value; drawTable(); };
+    U.qs('#f-status').onchange  = (e)=>{ filters.status    = e.target.value; drawTable(); };
 
-    // tombol detail (render di bawah rekap, tidak membuka jendela baru)
+    // Tampilkan detail di bawah rekap
     U.qs('#btn-details').onclick = async ()=>{
       const data = filtered();
       if(!data.length){ U.toast('Tidak ada data ditampilkan.','warning'); return; }
@@ -640,9 +711,13 @@ async function fetchDetailsForPrint(list){
           <tr><td>${i+1}</td><td>${row.pekerjaan||''}</td><td class="text-end">${fmt.id0(row.qty||0)}</td><td class="text-end">${fmt.idr(row.total_rp||0)}</td></tr>
         `).join('') || `<tr><td colspan="4" class="text-center text-muted">Tidak ada pekerjaan borongan.</td></tr>`;
 
+        const st = normalizeStatus(hdr.status||hdr.raw_status||hdr.state);
         return `
           <div class="card mb-3">
-            <div class="card-header"><b>${hdr.nomor||'-'}</b> · ${fmt.periodeYM(hdr.periode)||'-'} · ${labelDivisiFromKode(hdr.divisi_id)||'-'} · ${(estateRowById(hdr.estate_id).nama_panjang||'')}</div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div><b>${hdr.nomor||'-'}</b> · ${fmt.periodeYM(hdr.periode)||'-'} · ${labelDivisiFromKode(hdr.divisi_id)||'-'} · ${(estateRowById(hdr.estate_id).nama_panjang||'')}</div>
+              <span class="status-pill st-${st}">${st}</span>
+            </div>
             <div class="card-body p-2">
               <div class="row g-2">
                 <div class="col-md-6">
@@ -670,21 +745,27 @@ async function fetchDetailsForPrint(list){
       U.toast('Detail dimuat.','success');
     };
 
+    // Gambar tabel awal
     drawTable();
   }
 
+  // -------------------------------------------------------------
+  // 10) DRAW TABLE (pakai data terfilter)
+  // -------------------------------------------------------------
   function drawTable(){
     const data = filtered();
     const tb = U.qs('#ktu-rows');
     if(!data.length){
-      tb.innerHTML = `<tr><td colspan="6" class="text-center text-muted">Tidak ada data.</td></tr>`;
+      tb.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Tidak ada data.</td></tr>`;
       U.qs('#ktu-total').textContent = fmt.idr(0);
       return;
     }
     tb.innerHTML = data.map(r=>{
+      const st = r.status || 'UNKNOWN';
       return `
         <tr>
           <td style="white-space:nowrap">${r.nomor||'-'}</td>
+          <td><span class="status-pill st-${st}">${st}</span></td>
           <td>${r.periode||'-'}</td>
           <td>${labelDivisiFromKode(r.divisi_id)}</td>
           <td>${labelRayonFromKode(r.rayon_kode)}</td>
@@ -697,6 +778,8 @@ async function fetchDetailsForPrint(list){
     U.qs('#ktu-total').textContent = fmt.idr(tot);
   }
 
-  // go
-  load(true);
+  // -------------------------------------------------------------
+  // 11) START
+  // -------------------------------------------------------------
+  loadHeaders(true);
 };

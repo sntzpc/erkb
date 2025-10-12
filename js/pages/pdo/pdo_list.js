@@ -786,6 +786,52 @@ async function buildDetailFromActuals(nomor){
   }
 }
 
+// === [NEW] Rehydrate draft lokal dari actuals server bila status server = 'draft' ===
+async function rehydrateDraftFromActuals(nomor){
+  // Sudah ada draft? langsung kembalikan
+  let arr = getDrafts();
+  const idx = arr.findIndex(x => String(x.nomor) === String(nomor));
+  if (idx > -1) return arr[idx];
+
+  // Ambil detail dari actuals (LOCAL cache STORE) → build jadi draft lokal
+  const detail = await buildDetailFromActuals(nomor);
+  if (!detail || !detail.header) return null;
+
+  const h = detail.header;
+  // Paksa status 'draft' agar bisa disunting kembali (server memang sudah draft)
+  const draftObj = {
+    nomor: h.nomor,
+    periode: h.periode,
+    estate_id: h.estate_id,
+    rayon_id:  h.rayon_id,
+    divisi_id: h.divisi_id,
+    ref_rkb:   h.ref_rkb || '',
+    upah_hk_sku: Number(h.upah_hk_sku||0),
+    upah_hk_bhl: Number(h.upah_hk_bhl||0),
+    premi_panen: Number(h.premi_panen||0),
+    premi_non_panen: Number(h.premi_non_panen||0),
+    target_produksi_ton: Number(h.target_produksi_ton||0),
+    created_ts: h.created_ts || '',
+    asst_ts:    h.asst_ts || '',
+    askep_ts:   h.askep_ts || '',
+    manager_ts: h.manager_ts || '',
+    status:     'draft',
+    // pisahkan items:
+    hk:  (detail.items||[]).filter(x=> String(x.tipe_item).toUpperCase()==='HK'),
+    borongan: (detail.items||[]).filter(x=> String(x.tipe_item).toUpperCase()==='BOR'),
+    __serverLinked: true // penanda: draft ini hasil rehydrate dari server
+  };
+
+  // Simpan ke draft lokal (replace kalau ada)
+  arr = getDrafts();
+  const idx2 = arr.findIndex(x => String(x.nomor) === String(nomor));
+  if (idx2 > -1) arr[idx2] = draftObj; else arr.push(draftObj);
+  setDrafts(arr);
+
+  return draftObj;
+}
+
+
 
 // ===== Row actions – gunakan buffer agar router pasti match =====
 async function viewRow(nomor){
@@ -847,13 +893,25 @@ async function viewRow(nomor){
 }
 
 
-  function editRow(nomor){
-    const d = (getDrafts()||[]).find(x=> String(x.nomor)===String(nomor));
-    if(!d){ U.alert('Draft tidak ditemukan.'); return; }
-    U.S.set('pdo.form.buffer', d);
-    U.S.del('pdo.form.readonly');
-    location.hash = '#/pdo/form';
+  async function editRow(nomor){
+  // Coba draft lokal
+  let d = (getDrafts()||[]).find(x=> String(x.nomor)===String(nomor));
+
+  // Jika belum ada, tapi status server kemungkinan 'draft', rehydrate dari actuals
+  if (!d) {
+    // optional: cek status dari daftar gabungan 'data'
+    const rec = (data||[]).find(x => String(x.nomor)===String(nomor));
+    if (rec && String(rec.status||'').toLowerCase()==='draft') {
+      d = await rehydrateDraftFromActuals(nomor);
+    }
   }
+  if(!d){ U.alert('Draft tidak ditemukan. Silakan "Perbarui Status" dulu.'); return; }
+
+  U.S.set('pdo.form.buffer', d);
+  U.S.del('pdo.form.readonly');
+  location.hash = '#/pdo/form';
+}
+
   function delRow(nomor){
     const arr = getDrafts().filter(x=> String(x.nomor)!==String(nomor));
     setDrafts(arr);
@@ -891,6 +949,13 @@ async function viewRow(nomor){
           );
           sortData(data);
         }
+        // Jika status server sekarang 'draft' dan draft lokal belum ada → rehydrate
+          if (String(found.status||'').toLowerCase() === 'draft') {
+            const hasLocal = (getDrafts()||[]).some(x => String(x.nomor)===String(nomor));
+            if (!hasLocal) {
+              await rehydrateDraftFromActuals(nomor);
+            }
+          }
         U.toast('Status diperbarui.', 'success');
       }else{
         U.toast('Nomor tidak ditemukan di actuals untuk scope Anda.', 'warning');
@@ -909,35 +974,52 @@ async function viewRow(nomor){
 
 
   async function syncRow(nomor){
-    const arr = getDrafts();
-    const obj = arr.find(x=> String(x.nomor)===String(nomor));
-    if(!obj){ U.alert('Draft tidak ditemukan.'); return; }
-    const payload = {
-      row: {
-        nomor: obj.nomor, ref_rkb: obj.ref_rkb, periode: obj.periode,
-        estate_id: String(obj.estate_id ?? '').trim(),rayon_id:  String(obj.rayon_id  ?? '').trim(),divisi_id: obj.divisi_id,
-        upah_hk_bhl: obj.upah_hk_bhl, upah_hk_sku: obj.upah_hk_sku,
-        premi_panen: obj.premi_panen, premi_non_panen: obj.premi_non_panen,
-        target_produksi_ton: obj.target_produksi_ton,
-        created_ts: obj.created_ts, askep_ts: obj.askep_ts||'', manager_ts: obj.manager_ts||'',
-      },
-      items: { hk: obj.hk||[], borongan: obj.borongan||[] }
-    };
-    try{
-      U.progressOpen('Kirim PDO...'); U.progress(40,'Kirim data');
-      const res = await API.call('pushPDOv2', payload);
-      if(!res.ok){ throw new Error(res.error||'Gagal sync PDO'); }
-      obj.status = 'submitted';
-      obj.updated_at = new Date().toISOString();
-      setDrafts(arr); data = arr; sortData(data);
-      U.toast('PDO terkirim. Menunggu persetujuan.','success');
-    }catch(e){
-      U.alert(e.message||'Gagal sync PDO');
-    }finally{
-      U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(),200);
-      renderRows(); renderPager(); updateInfo();
+  // Pastikan ada draft lokal; kalau belum ada tapi server status draft → rehydrate dulu
+  let arr = getDrafts();
+  let obj = arr.find(x=> String(x.nomor)===String(nomor));
+  if (!obj) {
+    const rec = (data||[]).find(x => String(x.nomor)===String(nomor));
+    if (rec && String(rec.status||'').toLowerCase()==='draft') {
+      obj = await rehydrateDraftFromActuals(nomor);
+      arr = getDrafts(); // refresh ref
     }
   }
+  if(!obj){ U.alert('Draft tidak ditemukan. Silakan "Perbarui Status" dulu.'); return; }
+
+  const payload = {
+    row: {
+      nomor: obj.nomor, ref_rkb: obj.ref_rkb, periode: obj.periode,
+      estate_id: String(obj.estate_id ?? '').trim(),
+      rayon_id:  String(obj.rayon_id  ?? '').trim(),
+      divisi_id: obj.divisi_id,
+      upah_hk_bhl: obj.upah_hk_bhl, upah_hk_sku: obj.upah_hk_sku,
+      premi_panen: obj.premi_panen, premi_non_panen: obj.premi_non_panen,
+      target_produksi_ton: obj.target_produksi_ton,
+      created_ts: obj.created_ts, askep_ts: obj.askep_ts||'', manager_ts: obj.manager_ts||'',
+    },
+    items: { hk: obj.hk||[], borongan: obj.borongan||[] }
+  };
+
+  try{
+    U.progressOpen('Kirim PDO...'); U.progress(40,'Kirim data');
+    const res = await API.call('pushPDOv2', payload);
+    if(!res.ok){ throw new Error(res.error||'Gagal sync PDO'); }
+    obj.status = 'submitted';
+    obj.updated_at = new Date().toISOString();
+    setDrafts(arr); data = mergeUniqueByNomor(
+      (getDrafts()||[]).map(r => ({...r, periode:fPeriode(r.periode)})),
+      readHistoryPdoFromActuals().map(r => ({...r, periode:fPeriode(r.periode)}))
+    );
+    sortData(data);
+    U.toast('PDO terkirim. Menunggu persetujuan.','success');
+  }catch(e){
+    U.alert(e.message||'Gagal sync PDO');
+  }finally{
+    U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(),200);
+    renderRows(); renderPager(); updateInfo();
+  }
+}
+
 
   // ===== Build UI (selaras RKB) =====
   async function build(){
@@ -1208,8 +1290,9 @@ function onPickRkbForNewPdo(nomorRkb){
       };
 
 const isHistory = !!r.__history;
-const canEdit   = !isHistory && (sRaw==='draft' || !r.status);
-const canSync   = !isHistory && ((r.hk && r.hk.length) || (r.borongan && r.borongan.length));
+const isDraft   = String(r.status||'draft').toLowerCase() === 'draft';
+const canEdit   = isDraft;
+const canSync   = isDraft; 
 const canDelete = !isHistory && canEdit && !r.__serverLinked;
 
 const histBadge = isHistory

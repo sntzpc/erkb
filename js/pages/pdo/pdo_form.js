@@ -175,6 +175,24 @@ Pages.pdoForm = function () {
   .pdo-total-cell { white-space: nowrap; }
   .is-invalid { outline: 2px solid #dc3545 !important; }
 
+  /* === VALIDASI NILAI TIDAK WAJAR (TOTAL) === */
+  .pdo-total-cell.warn-yellow{
+    background: #fff3cd !important; /* bootstrap warning-ish */
+    position: relative;
+  }
+  .pdo-total-cell.warn-red{
+    background: #f8d7da !important; /* bootstrap danger-ish */
+    position: relative;
+  }
+  .pdo-total-cell .verify-badge{
+    position:absolute; right:6px; top:50%; transform: translateY(-50%);
+    font-size:.85rem; line-height:1; opacity:.9;
+  }
+  .pdo-total-cell.is-clickable{ cursor:pointer; text-decoration: underline dotted; }
+  .pdo-verify-modal dt{ font-weight:600; }
+  .pdo-verify-modal code{ background:#f6f8fa; padding:.1rem .35rem; border-radius:4px; }
+
+
   @media (max-width: 768px){
     /* di mobile: pekerjaan full-width, sel jangan sempit */
     .pdo-pekerjaan-input { min-width: 0; width: 100%; }
@@ -270,6 +288,71 @@ function genNoPDO(divisi) {
   const div = String(divisi || "XX").toUpperCase().replace(/\s+/g, "");
   // PDO{divisi}{YYMMDD}{hhmmss}
   return `PDO${div}${yy}${mm}${dd}${hh}${mi}${ss}`;
+}
+
+
+// ====== VALIDASI NILAI TIDAK WAJAR (TOTAL) ======
+// Kuning: 200 jt s/d 500 jt (inklusif)
+// Merah : > 500 jt
+const YELLOW_MIN = 200_000_000;
+const RED_MIN    = 500_000_000;
+
+// Ambil "secret" verifikasi (fallback multi-sumber)
+function getVerifierSecret(){
+  const p = SESSION.profile?.() || {};
+  // prioritas: pin → password → pin di localStorage (app.pin)
+  return String(p.pin || p.password || U.S.get('app.pin','') || '').trim();
+}
+
+// Cek apakah total butuh label warna
+function flagClassByTotal(total){
+  const n = Number(total||0);
+  if (n >= RED_MIN) return 'warn-red';            // > 500 jt ⇒ merah
+  if (n >= YELLOW_MIN) return 'warn-yellow';      // 200–500 jt ⇒ kuning
+  return '';                                      // < 200 jt ⇒ normal
+}
+
+// State verifikasi disimpan di F._verif : { hk: { [i]: {amount, at, ok} }, bor: { ... } }
+function ensureVerifState(){
+  if (!F._verif) F._verif = { hk:{}, bor:{} };
+}
+
+// Tandai verifikasi row
+function setVerified(sec, idx, amount){
+  ensureVerifState();
+  (F._verif[sec] = F._verif[sec] || {});
+  F._verif[sec][idx] = { ok:true, amount:Number(amount||0), at: new Date().toISOString() };
+  saveDebounced();
+}
+
+// Apakah sudah diverifikasi dan masih relevan (jumlahnya tidak berubah)?
+function isVerified(sec, idx, amount){
+  const m = F._verif && F._verif[sec] && F._verif[sec][idx];
+  if (!m || !m.ok) return false;
+  return Number(m.amount||0) === Number(amount||0);
+}
+
+// Jika jumlah berubah setelah verifikasi → tandai ulang (butuh verifikasi lagi)
+function refreshVerifyStale(sec, idx, amount){
+  ensureVerifState();
+  const m = F._verif[sec] && F._verif[sec][idx];
+  if (m && Number(m.amount||0) !== Number(amount||0)){
+    delete F._verif[sec][idx]; // invalidate
+  }
+}
+
+// Kumpulkan item yang perlu verifikasi tapi belum diverifikasi (untuk warning saat Save)
+function collectUnverifiedFlags(){
+  const pending = [];
+  (F.hk||[]).forEach((r,i)=>{
+    const cls = flagClassByTotal(r.total_rp||0);
+    if (cls && !isVerified('hk', i, r.total_rp)) pending.push({sec:'hk', idx:i, total:r.total_rp});
+  });
+  (F.borongan||[]).forEach((r,i)=>{
+    const cls = flagClassByTotal(r.total_rp||0);
+    if (cls && !isVerified('bor', i, r.total_rp)) pending.push({sec:'bor', idx:i, total:r.total_rp});
+  });
+  return pending;
 }
 
 
@@ -603,6 +686,37 @@ function genNoPDO(divisi) {
     return { activity_type: tipe, nama, satuan, tarif_borongan: tarif };
   }
 
+
+  // === Normalisasi & migrasi Tipe HK ===
+function normHKType(v){
+  const s = String(v || "").trim().toUpperCase();
+  return (s === "SKU" || s === "BHL") ? s : "";
+}
+
+// Migrasi draft lama & normalisasi (tipe_hk -> tipe), kosong diisi default "SKU" bila perlu
+function ensureHKTypeNormalized(){
+  if (!Array.isArray(F.hk)) return;
+  F.hk.forEach((row) => {
+    // migrasi nama field lama
+    if (!row.tipe && row.tipe_hk) row.tipe = row.tipe_hk;
+
+    // normalisasi nilai
+    let t = normHKType(row.tipe);
+    if (!t) {
+      // fallback: coba tebak dari total vs rate
+      const rateSKU = Number(F.upah_hk_sku || 0);
+      const rateBHL = Number(F.upah_hk_bhl || 0);
+      const hk = Number(row.hk || 0);
+      const tot = Number(row.total_rp || 0);
+      if (hk > 0 && rateSKU > 0 && Math.round(hk * rateSKU) === tot) t = "SKU";
+      else if (hk > 0 && rateBHL > 0 && Math.round(hk * rateBHL) === tot) t = "BHL";
+    }
+    // masih kosong? isi default SKU agar tidak memblokir
+    row.tipe = normHKType(t) || "SKU";
+  });
+}
+
+
   // ======== Model ========
   const DKEY = "pdo.form.buffer";
   let F = U.S.get(DKEY, null);
@@ -693,23 +807,26 @@ function genNoPDO(divisi) {
 
   // ======== Perhitungan ========
   function recomputeTotals() {
-    (F.hk || []).forEach((it, i) => {
-      const rate =
-        String(it.tipe || "").toUpperCase() === "SKU"
-          ? Number(F.upah_hk_sku || 0)
-          : Number(F.upah_hk_bhl || 0);
-      it.total_rp = Math.round(Number(it.hk || 0) * rate);
-      updateRowTotalCell("hk", i);
-    });
-    (F.borongan || []).forEach((it, i) => {
-      it.total_rp = Math.round(
-        Number(it.qty || 0) * Number(it.tarif_borongan || 0)
-      );
-      updateRowTotalCell("bor", i);
-    });
-    updateHeaderTotalsUI();
-    saveDebounced();
-  }
+  (F.hk || []).forEach((it, i) => {
+    const rate =
+      String(it.tipe || "").toUpperCase() === "SKU"
+        ? Number(F.upah_hk_sku || 0)
+        : Number(F.upah_hk_bhl || 0);
+    it.total_rp = Math.round(Number(it.hk || 0) * rate);
+    refreshVerifyStale('hk', i, it.total_rp);      // <-- TAMBAH
+    updateRowTotalCell("hk", i);
+  });
+  (F.borongan || []).forEach((it, i) => {
+    it.total_rp = Math.round(
+      Number(it.qty || 0) * Number(it.tarif_borongan || 0)
+    );
+    refreshVerifyStale('bor', i, it.total_rp);     // <-- TAMBAH
+    updateRowTotalCell("bor", i);
+  });
+  updateHeaderTotalsUI();
+  saveDebounced();
+}
+
 
   function addHK() {
     (F.hk = F.hk || []).push({
@@ -913,6 +1030,7 @@ function genNoPDO(divisi) {
     F.hk = HK;
     F.borongan = BOR;
     bindRatesIfEmpty();
+    ensureHKTypeNormalized();
     recomputeTotals();
     saveDebounced();
   }
@@ -1190,23 +1308,53 @@ function genNoPDO(divisi) {
   }
 
   function updateRowTotalCell(sec, i) {
-    const sel = `[data-total-cell="${sec}-${i}"]`;
-    const td = root.querySelector(sel);
-    if (!td) return;
-    const arr = sec === "hk" ? F.hk || [] : F.borongan || [];
-    const it = arr[i] || {};
-    td.textContent = fmtIDR(Number(it.total_rp || 0));
-  }
+  const sel = `[data-total-cell="${sec}-${i}"]`;
+  const td = root.querySelector(sel);
+  if (!td) return;
+  const arr = sec === "hk" ? F.hk || [] : F.borongan || [];
+  const it = arr[i] || {};
+  const total = Number(it.total_rp||0);
+  td.textContent = fmtIDR(total);
 
-  function footerActions() {
-    return READONLY
-      ? ""
-      : `
-      <div class="d-grid gap-2 my-3">
-        <button class="btn btn-primary btn-lg" id="btn-save-draft">Simpan Draft</button>
-      </div>
-    `;
+  // reset kelas
+  td.classList.remove('warn-yellow','warn-red','is-clickable');
+  const oldBadge = td.querySelector('.verify-badge');
+  if (oldBadge) oldBadge.remove();
+
+  // cek flag
+  const cls = flagClassByTotal(total);
+  if (cls){
+    td.classList.add(cls, 'is-clickable');
+    // cek verifikasi
+    if (isVerified(sec, i, total)){
+      const b = document.createElement('span');
+      b.className = 'verify-badge';
+      b.innerHTML = '✓';
+      td.appendChild(b);
+    }
+    // klik untuk verifikasi
+    if (!READONLY){
+      td.onclick = ()=> openVerifyModal(sec, i);
+      td.title = 'Klik untuk verifikasi total';
+    }
+  }else{
+    td.onclick = null;
+    td.removeAttribute('title');
   }
+}
+
+
+function footerActions() {
+  return READONLY
+    ? ""
+    : `
+    <div class="d-grid gap-2 my-3">
+      <button class="btn btn-primary btn-lg" id="btn-save-draft">Simpan Draft (Lokal)</button>
+      <button class="btn btn-success btn-lg" id="btn-sync-server">Sync ke Server (Full Replace)</button>
+    </div>
+  `;
+}
+
 
   function backfillActivityFromName(row, isBor) {
     if (row.activity_type) return;
@@ -1341,6 +1489,103 @@ function genNoPDO(divisi) {
 </div>`;
     document.body.appendChild(wrap.firstElementChild);
   })();
+
+
+  // === MODAL VERIFIKASI TOTAL ===
+(function ensureVerifyModal(){
+  if (document.getElementById('pdo-verify-modal')) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+<div class="modal fade" id="pdo-verify-modal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content pdo-verify-modal">
+      <div class="modal-header">
+        <h5 class="modal-title">Verifikasi Total (Rp)</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <dl class="row mb-2">
+          <dt class="col-4">Jenis</dt><dd class="col-8" id="v-kind">-</dd>
+          <dt class="col-4">Baris</dt><dd class="col-8" id="v-index">-</dd>
+          <dt class="col-4">Perhitungan</dt><dd class="col-8" id="v-calc">-</dd>
+          <dt class="col-4">Total</dt><dd class="col-8" id="v-total">-</dd>
+        </dl>
+        <div class="mb-2">
+          <label class="form-label">Password Verifikasi</label>
+          <input type="password" class="form-control" id="v-pass" placeholder="Masukkan password"/>
+          <div class="form-text">Gunakan PIN/Password akun Anda.</div>
+        </div>
+        <div class="alert alert-warning small mb-0" id="v-hint" style="display:none"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Batal</button>
+        <button class="btn btn-primary" id="v-ok">Konfirmasi</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+  document.body.appendChild(wrap.firstElementChild);
+})();
+
+
+let __verify_ctx = null;
+
+function openVerifyModal(sec, idx){
+  // siapkan konteks
+  const isHK = (sec === 'hk');
+  const arr = isHK ? (F.hk||[]) : (F.borongan||[]);
+  const it  = arr[idx] || {};
+  const modalEl = document.getElementById('pdo-verify-modal');
+  const M = bootstrap?.Modal ? (bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl)) : null;
+
+  // Rangkai info perhitungan
+  let calcHTML = '-';
+  if (isHK){
+    // Total = HK * (upah sesuai tipe)
+    const rate = String(it.tipe||'').toUpperCase()==='SKU' ? Number(F.upah_hk_sku||0) : Number(F.upah_hk_bhl||0);
+    calcHTML = `HK (<code>${Number(it.hk||0)}</code>) × Upah ${it.tipe||'-'} (<code>${fmtIDR(rate)}</code>) = <strong>${fmtIDR(it.total_rp||0)}</strong>`;
+  }else{
+    calcHTML = `Qty (<code>${Number(it.qty||0)}</code>) × Tarif (<code>${fmtIDR(it.tarif_borongan||0)}</code>) = <strong>${fmtIDR(it.total_rp||0)}</strong>`;
+  }
+
+  // Isi UI
+  U.qs('#v-kind').textContent  = isHK ? 'Pekerjaan HK' : 'Pekerjaan Borongan';
+  U.qs('#v-index').textContent = String(idx+1);
+  U.qs('#v-calc').innerHTML    = calcHTML;
+  U.qs('#v-total').textContent = fmtIDR(it.total_rp||0);
+  const hint = U.qs('#v-hint'); if (hint) hint.style.display='none';
+  const inp  = U.qs('#v-pass'); if (inp){ inp.value=''; setTimeout(()=>inp.focus(), 150); }
+
+  __verify_ctx = { sec, idx, amount: Number(it.total_rp||0) };
+
+  if (M) M.show();
+
+  const btnOK = U.qs('#v-ok');
+  if (btnOK){
+    btnOK.onclick = () => {
+      const secret = getVerifierSecret();
+      const pass = (U.qs('#v-pass')?.value||'').trim();
+      if (!secret){
+        // Tidak ada secret terset → izinkan, tapi beri hint
+        setVerified(sec, idx, __verify_ctx.amount);
+        if (hint){ hint.textContent = 'Tidak ditemukan PIN/Password di profil. Verifikasi diterima (tanpa pembanding).'; hint.style.display='block'; }
+        setTimeout(()=>{ bootstrap.Modal.getInstance(modalEl)?.hide(); }, 700);
+        decorateAllTotals(); // refresh tanda cek
+        return;
+      }
+      if (!pass || pass !== secret){
+        U.toast('Password verifikasi salah.', 'danger');
+        if (hint){ hint.textContent = 'Password salah. Silakan ulangi.'; hint.style.display='block'; }
+        return;
+      }
+      setVerified(sec, idx, __verify_ctx.amount);
+      U.toast('Baris telah diverifikasi.', 'success');
+      bootstrap.Modal.getInstance(modalEl)?.hide();
+      decorateAllTotals(); // refresh tanda cek
+    };
+  }
+}
+
 
   function _pdoHasRefRkb(ref) {
     if (!ref) return false;
@@ -1480,7 +1725,14 @@ function genNoPDO(divisi) {
     } catch (_) {}
   }
 
+  function decorateAllTotals(){
+  (F.hk||[]).forEach((_,i)=> updateRowTotalCell('hk', i));
+  (F.borongan||[]).forEach((_,i)=> updateRowTotalCell('bor', i));
+}
+
+
   function render() {
+    ensureHKTypeNormalized();
     const totalHK = (F.hk || []).reduce(
       (a, b) => a + Number(b.total_rp || 0),
       0
@@ -1669,6 +1921,15 @@ ${footerActions()}
           onSaveDraft();
         });
       }
+
+      const btnSync = U.qs('#btn-sync-server');
+        if (btnSync) {
+          btnSync.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await syncToServer();
+          });
+        }
+
     }
     if (!READONLY) {
       attachMaskText("inp-target", "id2", (v) => {
@@ -1702,7 +1963,7 @@ ${footerActions()}
         }
       );
     }
-    updateHeaderTotalsUI();
+    updateHeaderTotalsUI(); decorateAllTotals();
   }
 
   // ======== VALIDATION ========
@@ -1738,7 +1999,7 @@ ${footerActions()}
     // Sinkronkan nilai dari UI (kalau user baru mengetik lalu langsung klik)
     const elTargetNow = root.querySelector("#inp-target");
     if (elTargetNow) F.target_produksi_ton = parseLocal(elTargetNow.value);
-
+    ensureHKTypeNormalized();
     clearValidationMarks();
     const errors = [];
     let firstEl = null;
@@ -1809,13 +2070,20 @@ ${footerActions()}
     // ===== Detail HK =====
     (F.hk || []).forEach((it, i) => {
       const elType = findCellInput("hk", "activity_type", i);
-      const elJob = findCellInput("hk", "pekerjaan", i); // disabled; hanya penanda error
-      const elSat = findCellInput("hk", "satuan", i);
+      const elJob  = findCellInput("hk", "pekerjaan", i);
+      const elSat  = findCellInput("hk", "satuan", i);
       const elLuas = findCellInput("hk", "luas_ha", i);
-      const elHK = findCellInput("hk", "hk", i);
+      const elHK   = findCellInput("hk", "hk", i);
       const elTipe = root.querySelector(
         `tr[data-row-type="hk"] select[data-sec="hk"][data-k="tipe"][data-i="${i}"]`
       );
+
+      // --- HYDRATE: kalau model kosong tapi DOM ada, ambil dari DOM ---
+      if (!reqStr(it.tipe) && elTipe && reqStr(elTipe.value)) {
+        it.tipe = normHKType(elTipe.value);
+      } else {
+        it.tipe = normHKType(it.tipe);
+      }
 
       if (!reqStr(it.activity_type)) {
         errors.push(`HK baris ${i + 1}: Activity Type wajib diisi.`);
@@ -1823,14 +2091,9 @@ ${footerActions()}
         markInvalid(elType, "Wajib diisi");
       }
       if (!reqStr(it.pekerjaan)) {
-        errors.push(
-          `HK baris ${i + 1}: Jenis Pekerjaan tidak terbaca dari master.`
-        );
+        errors.push(`HK baris ${i + 1}: Jenis Pekerjaan tidak terbaca dari master.`);
         if (!firstEl) firstEl = elType || elJob;
-        markInvalid(
-          elJob || elType,
-          "Isi/benarkan Activity Type (nama otomatis)"
-        );
+        markInvalid(elJob || elType, "Isi/benarkan Activity Type (nama otomatis)");
       }
       if (!reqStr(it.satuan)) {
         errors.push(`HK baris ${i + 1}: Satuan wajib diisi.`);
@@ -1853,9 +2116,7 @@ ${footerActions()}
         markInvalid(elTipe, "Pilih tipe");
       }
       if (!reqPos(it.total_rp)) {
-        // total dihitung otomatis; kalau 0 kemungkinan upah 0 atau hk 0
         errors.push(`HK baris ${i + 1}: Total (Rp) masih 0 — cek Upah/HK.`);
-        // tak perlu mark: sudah ditandai di komponen penyebab
       }
     });
 
@@ -1920,8 +2181,104 @@ ${footerActions()}
     return true;
   }
 
+  function buildPayloadReplace(){
+  // pastikan perhitungan up to date
+  recomputeTotals();
+
+  // normalisasi baris untuk payload
+  const hk = (F.hk||[]).map(r=>({
+    activity_type: r.activity_type||'',
+    pekerjaan: r.pekerjaan||'',
+    satuan: r.satuan||'',
+    luas_ha: Number(r.luas_ha||0),
+    hk: Number(r.hk||0),
+    tipe: String(r.tipe||'').toUpperCase(),     // 'SKU' | 'BHL'
+    total_rp: Number(r.total_rp||0)
+  }));
+
+  const bor = (F.borongan||[]).map(r=>({
+    activity_type: r.activity_type||'',
+    pekerjaan: r.pekerjaan||'',
+    satuan: r.satuan||'',
+    qty: Number(r.qty||0),
+    tarif_borongan: Number(r.tarif_borongan||0),
+    total_rp: Number(r.total_rp||0)
+  }));
+
+  return {
+    action: 'pdoReplace',
+    token: SESSION.token?.() || SESSION.get?.('token') || '',
+    row: {
+      nomor: F.nomor,
+      periode: F.periode,
+      estate_id: F.estate_id,
+      rayon_id: F.rayon_id,
+      divisi_id: F.divisi_id,
+      ref_rkb: F.ref_rkb,
+      upah_hk_bhl: Number(F.upah_hk_bhl||0),
+      upah_hk_sku: Number(F.upah_hk_sku||0),
+      target_produksi_ton: Number(F.target_produksi_ton||0),
+      premi_panen: Number(F.premi_panen||0),
+      premi_non_panen: Number(F.premi_non_panen||0),
+      status: F.status || 'draft',            // ← biarkan 'draft' ketika revisi
+      created_ts: F.created_ts || null
+    },
+    items: { hk, borongan: bor }
+  };
+}
+
+async function syncToServer(){
+  if (!validateBeforeSave()) return;
+
+  const payload = buildPayloadReplace();
+
+  // Ganti URL di bawah ini sesuai URL Web App GAS Anda
+  const BACKEND_URL = SESSION.backendUrl?.() || U.S.get('backend.url') || window.APP_BACKEND_URL;
+
+  if (!BACKEND_URL){
+    U.alert('BACKEND_URL belum diset. Harap set URL web app di konfigurasi.');
+    return;
+  }
+
+  try{
+    U.block?.('Menyinkronkan PDO ke server...');
+    const res = await fetch(BACKEND_URL, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+
+    if (!json.ok){
+      U.toast(json.error || 'Gagal sync', 'danger');
+      U.unblock?.();
+      return;
+    }
+
+    // Sukses
+    F.status = json.status || F.status || 'draft';
+    U.S.set('pdo.form.buffer', F);
+
+    // Opsional: update cache actuals lokal setelah sync (jika Anda punya mekanisme pull otomatis, boleh dilewati)
+    U.toast('Sync ke server berhasil (Full Replace).', 'success');
+  }catch(err){
+    console.error(err);
+    U.toast('Gagal terhubung ke server.', 'danger');
+  }finally{
+    U.unblock?.();
+  }
+}
+
   async function onSaveDraft() {
     if (!validateBeforeSave()) return;
+
+    // === WARNING jika masih ada flag yang belum diverifikasi (TIDAK MEMBLOKIR SIMPAN) ===
+    const notVerified = collectUnverifiedFlags();
+    if (notVerified.length){
+      const list = notVerified.map(x=>`• ${x.sec.toUpperCase()} baris ${x.idx+1} (Total: ${fmtIDR(x.total)})`).join('\n');
+      U.alert(`Ada ${notVerified.length} baris dengan total berwarna yang BELUM diverifikasi:\n\n${list}\n\nDraft tetap akan disimpan, namun mohon lengkapi verifikasinya sebelum diajukan.`);
+    }
+
 
     // VALIDASI: 1 RKB ⇔ 1 PDO
     if (String(F.ref_rkb || "").trim()) {
@@ -1981,7 +2338,9 @@ ${footerActions()}
       F.periode = `${d.getFullYear()}-${mm}`;
     }
     window.__PDO_CCTV.periode = F.periode;
-    ensureDebugPanel(); // ← pasang panel bila debug=1
+    ensureDebugPanel();
+    ensureVerifState();
+    ensureHKTypeNormalized();
 
     bindRatesIfEmpty();
     await preloadFromRKB();

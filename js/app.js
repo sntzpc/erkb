@@ -578,10 +578,8 @@ btnClear.onclick = async ()=>{
   if (String(mode||'').toUpperCase() === 'TOTAL') {
     const really = confirm('Yakin reset TOTAL? Ini akan menghapus SEMUA data lokal & logout.');
     if (!really) return;
-    U.safeProgressOpen('Reset total data lokal...');
     try { await doHardReset(); } finally {
       try{ U.progressClose(); }catch(_){}
-      U.progressHardClose();
     }
     return;
   }
