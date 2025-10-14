@@ -323,8 +323,8 @@ window.addEventListener('DOMContentLoaded', () => {
         case hash==='#/pdo/approvals/manager':    Pages.pdoApprovalsManager(); break;
 
         // RKH
-        case hash==='#/rkh/form':                 Pages.rkhForm ? Pages.rkhForm() : Pages._dummy('RKH Form'); break;
-        case hash==='#/rkh/draft':                Pages.rkhList ? Pages.rkhList('draft') : Pages._dummy('RKH Draft'); break;
+        case hash==='#/rkh/form':                 Pages.rkhForm(); break;
+        case hash==='#/rkh/draft':                Pages.rkhList('draft'); break;
 
         // Kotak keluar & pesan
         case hash==='#/outbox':                   Pages.rkbList('outbox'); break;
