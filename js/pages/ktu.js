@@ -1,12 +1,11 @@
-// js/pages/ktu.js (CLEAN — No CCTV, No-Material: prefer server → fallback master.ybahan)
+// js/pages/ktu.js (CLEAN — No CCTV, No-Material strictly from master.ybahan)
 window.Pages = window.Pages || {};
 Pages.ktu = async function () {
   const root = U.qs('#app-root');
 
   // ====== 0) GUARANTEE MASTERS & ACTUALS ARE WARM ======
-  // ybahan dibuat opsional (untuk fallback no_material), agar tidak memblok UI jika belum ada
   const ok = await U.requireWarmOrRedirect({
-    mastersNeeded: ['ydivisi', 'yrayon', 'yestate'], // ybahan opsional
+    mastersNeeded: ['ydivisi', 'yrayon', 'yestate', 'ybahan'], // pastikan ybahan ada
     actualsNeeded: ['rkb']
   });
   if (!ok) {
@@ -141,10 +140,11 @@ Pages.ktu = async function () {
     const submitted = truthy(rkbRow.submitted ?? rkbRow.is_submitted) || (String(rkbRow.status).toLowerCase() === 'submitted');
     if (submitted) return 'submitted';
     const draft = truthy(rkbRow.is_draft) || String(rkbRow.status).toLowerCase() === 'draft';
+    if (draft) return 'draft';
     return 'unknown';
   }
 
-  // ====== 5) INDEX ybahan & resolver No Material (fallback dari master.ybahan) ======
+  // ====== 5) INDEX ybahan & resolver No Material (STRICT dari master.ybahan) ======
   function buildBahanIndex(yb = []) {
     const byKode = new Map();
     const byNama = new Map();
@@ -167,18 +167,31 @@ Pages.ktu = async function () {
     return { byKode, byNama };
   }
 
+  // Ambil no_material HANYA dari master ybahan berdasar nama bahan (case-insensitive)
   function resolveNoMaterialFromMaster(namaBahan, BX) {
     if (!isNonEmpty(namaBahan) || !BX) return '';
+    // 1) exact nama
     const hitNama = BX.byNama.get(_lc(namaBahan));
     if (hitNama) {
       const code = findAnyCode(hitNama);
       if (code) return code;
     }
+    // 2) jika nama mengandung token kode di depan (misal "123456 - HOSE") → coba byKode
     const lead = (String(namaBahan).trim().match(/^([A-Z0-9._-]{5,})\b/i)||[])[1];
     if (lead) {
       const hitKode = BX.byKode.get(_lc(lead));
       if (hitKode) {
         const code = findAnyCode(hitKode);
+        if (code) return code;
+      }
+    }
+    // 3) fallback ringan: cari nama master yang sama persis tanpa spasi ganda
+    const norm = _lc(String(namaBahan).replace(/\s+/g,' ').trim());
+    const byNamaKeys = BX.byNama.keys();
+    for (const k of byNamaKeys) {
+      if (k === norm) {
+        const row = BX.byNama.get(k);
+        const code = findAnyCode(row);
         if (code) return code;
       }
     }
@@ -208,7 +221,7 @@ Pages.ktu = async function () {
       masters.ydivisi = STORE.getMaster('ydivisi') || [];
       masters.yrayon  = STORE.getMaster('yrayon')  || [];
       masters.yestate = STORE.getMaster('yestate') || [];
-      masters.ybahan  = STORE.getMaster('ybahan')  || []; // opsional fallback
+      masters.ybahan  = STORE.getMaster('ybahan')  || [];
 
       const DX = buildDivisiIndex(masters.ydivisi);
       const RX = buildRayonIndex(masters.yrayon);
@@ -229,13 +242,13 @@ Pages.ktu = async function () {
         const pm = document.getElementById('progressModal');
         const pmShown = pm && pm.classList.contains('show');
         if (!pmShown) { U.progressOpen('Tarik rekap bahan...'); U.progress(30, 'Ambil data (server)'); openedHere = true; }
-        const r = await API.call('ktuRekap', {}); // BACKEND sudah ikut kirim no_material
+        const r = await API.call('ktuRekap', {});
         if (!r.ok) throw new Error(r.error || 'Gagal tarik rekap');
         raw = Array.isArray(r.items) ? r.items : [];
         setKtuCache(raw);
       }
 
-      // NORMALISASI → no_material: prefer dari server, fallback master.ybahan
+      // NORMALISASI → no_material strictly dari master.ybahan
       items = (Array.isArray(raw) ? raw : []).map(it => {
         const nomor = String(it.nomor);
         const rkb = rkbByNomor[nomor] || {};
@@ -247,11 +260,8 @@ Pages.ktu = async function () {
         const jumlah     = Number(it.jumlah || it.qty || 0);
         const satuan     = it.satuan || it.uom || '';
 
-        // *** PENTING: pakai dari BACKEND dulu; jika kosong → fallback master.ybahan ***
-        let no_material = String(it.no_material || '').trim();
-        if (!isNonEmpty(no_material)) {
-          no_material = resolveNoMaterialFromMaster(bahanNama, BX);
-        }
+        // *** PENTING: ambil dari master.ybahan ***
+        const no_material = resolveNoMaterialFromMaster(bahanNama, BX);
 
         const estateRow = estateById[estate_id] || {};
         const divRow    = divById[divisi_id] || {};

@@ -1,5 +1,5 @@
 // sw.js
-const CACHE = 'rkb-app-v2.2'; // bump version
+const CACHE = 'rkb-app-v2.11'; // bump version
 const RAW_ASSETS = [
   './',
   './index.html',
@@ -20,7 +20,7 @@ const RAW_ASSETS = [
   './js/pages/rkh/rkh_form.js',
   './js/pages/rkh/rkh_list.js',
   './js/pages/ktu.js',
-  // <<< PERBAIKAN: jangan pakai path root "/" di sini
+  // <<< PERBAIKAN: jangan pakai path root
   './js/pages/master/settings.master.js',
   './js/pages/master/settings.upload.js',
   './js/pages/master/settings.reset.js',

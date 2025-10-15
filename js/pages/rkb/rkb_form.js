@@ -130,19 +130,35 @@ Pages.rkbForm = function(){
 
 
   // === API adapter (pakai yang ada di project Anda, fallback ke fetch) ===
-const BACKEND_URL = window.BACKEND_URL || window.API_URL || ''; // kalau sudah ada global, pakai itu
-async function apiPost(action, payload){
-  if (window.API?.post) return window.API.post(action, payload);            // adapter project
-  if (window.U?.api?.post) return window.U.api.post(action, payload);        // adapter lain (kalau ada)
-  // fallback fetch
-  const token = SESSION.token?.() || '';
-  const res = await fetch(BACKEND_URL || '/exec', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action, token, ...payload})
-  });
-  return res.json();
+  function resolveBackendUrl(){
+  return (window.GAS_URL || window.BACKEND_URL || window.API_URL || (window.U?.S?.get?.('backend.url')) || '').toString().trim();
 }
+
+// === POST helper ke GAS (format sama seperti PDO: text/plain + JSON body) ===
+async function postRkbReplace(payload){
+  const url = resolveBackendUrl();
+  if(!url) throw new Error('BACKEND_URL/GAS_URL belum diset.');
+
+  // body mengikuti pola backend GAS Anda (aksi + token + payload)
+  const body = {
+    action: 'pushRKB',
+    token : (SESSION.token?.() || payload.token || ''),
+    ...payload
+  };
+
+  const res  = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(body)
+  });
+
+  const text = await res.text();
+  let json = {};
+  try { json = JSON.parse(text); } catch(_) {}
+  if(!json.ok) throw new Error(json.error || `Gagal kirim (HTTP ${res.status})`);
+  return json;
+}
+
 
 // === Helpers sinkron ke backend ===
 // Lokasi → string "A,B,C" (backend menyimpan di kolom 'lokasi' sebagai gabungan)
@@ -379,14 +395,24 @@ function existsOnServerByNomor(nomor){
       <div id="items-table" class="table-responsive mb-3"></div>
 
       <div class="d-flex flex-wrap gap-2">
-        <button id="btn-save-draft" class="btn btn-success">Simpan Draft</button>
-        <button id="btn-submit" class="btn btn-danger">
-          ${ existsOnServerByNomor(F.nomor) ? 'Replace ke Server' : 'Submit ke Server' }
+        ${(()=>{
+          const isServerDraft = !!F.__serverLinked && /^draft/i.test(String(F.status_label||F.status||'draft'));
+          const saveTitle = isServerDraft
+            ? 'Nonaktif saat revisi dari server (hindari duplikasi & nomor baru)'
+            : 'Simpan sebagai draft lokal';
+          // tombol Simpan Draft → disabled saat server draft
+          return `
+            <button id="btn-save-draft" class="btn btn-success" ${isServerDraft?'disabled':''} title="${saveTitle}">
+              Simpan Draft
+            </button>`;
+        })()}
+        <button id="btn-submit" class="btn btn-danger" title="Kirim Full Replace ke server">
+          ${ existsOnServerByNomor(F.nomor) || F.__serverLinked ? 'Replace ke Server' : 'Submit ke Server' }
         </button>
       </div>
       <div class="form-text mt-1">
-        Submit akan <strong>mengirim ulang seluruh item</strong> ke server (Full Replace). 
-        Jika nomor sudah pernah dikirim, detail lama akan <em>diganti</em>.
+        Replace akan <strong>mengganti seluruh detail</strong> pada nomor tersebut (Full Replace). 
+        Gunakan ini saat perbaikan dari Askep/Manager.
       </div>
     </div></div>`;
 
@@ -851,50 +877,101 @@ function buildPushPayload(){
 
 // === Submit/Replace ke server ===
 async function submitRKB(){
+  let nomorNow = '';
   try{
     const payload = buildPushPayload();
+    nomorNow = payload?.row?.nomor || F.nomor;
 
-    // Konfirmasi Full Replace bila nomor sudah ada di server
-    const already = existsOnServerByNomor(payload.row.nomor);
-    if (already){
+    // Konfirmasi jika nomor sudah ada di server
+    if (existsOnServerByNomor(nomorNow) || F.__serverLinked){
       const ok = confirm(
-        `No RKB ${payload.row.nomor} sudah ada di server.\n`+
-        `SUBMIT ini akan MENGGANTI SELURUH detail pada nomor tersebut (Full Replace).\n\n`+
+        `No RKB ${nomorNow} sudah ada di server.\n`+
+        `Aksi ini akan MENGGANTI SELURUH detail (Full Replace).\n\n`+
         `Lanjutkan?`
       );
       if(!ok) return;
     }
 
-    U.loading?.show?.(); // kalau project punya loader
-    const res = await apiPost('pushRKB', payload);
-    U.loading?.hide?.();
+    // paksa status 'submitted' di FE → server boleh mengabaikan/override
+    payload.row.status = 'submitted';
 
-    if(!res?.ok){
-      U.toast?.(res?.error || 'Gagal submit RKB', 'danger');
-      return;
-    }
+    // === PROGRESS ===
+    U.progressOpen?.('Menyiapkan data…');
+    U.progress?.(12, 'Validasi & kemas payload');
+    
+    U.progress?.(35, 'Mengirim ke server…');
+    const res = await postRkbReplace(payload);  // ← pakai helper baru
 
-    // Mark buffer & draft sebagai "server linked"
+    U.progress?.(60, 'Memproses respon…');
+    // sukses server
+    const statusNow = (res.status || 'submitted');
+
+    // === UPDATE BUFFER LOKAL ===
+    U.progress?.(75, 'Memperbarui cache lokal…');
+
+    // 1) rkb.form.buffer
     F.__serverLinked = true;
-    F.status = 'submitted';
-    F.status_label = 'submitted';
+    F.status = statusNow;
+    F.status_label = statusNow;
     F.updated_at = new Date().toISOString();
     U.S.set('rkb.form.buffer', F);
 
-    // Hapus draft lokal yang sama (opsi, supaya tidak bingung)
+    // 2) rkb.drafts → hapus nomor yang sama (supaya tidak terlihat “draft” lagi)
     const drafts = U.S.get('rkb.drafts', []) || [];
-    U.S.set('rkb.drafts', drafts.filter(d => _str(d.nomor)!==_str(F.nomor)));
+    U.S.set('rkb.drafts', drafts.filter(d => _str(d.nomor)!==_str(nomorNow)));
 
-    U.toast?.('RKB berhasil dikirim. Menunggu Approval Askep.', 'success');
+    // 3) Patch actuals ringkas (header) supaya halaman Rekap langsung baca 'submitted'
+    // kunci umum yang sering dipakai: 'kpl.actual.rkb' dan/atau 'rkb'
+    const patchActualsKey = (key)=>{
+      let arr = U.S.get(key, []);
+      if(!Array.isArray(arr)) arr = [];
+      let found = false;
+      for (let i=0;i<arr.length;i++){
+        if (_str(arr[i].nomor) === _str(nomorNow)){
+          arr[i].status     = statusNow;
+          arr[i].periode    = fPeriode(F.periode);
+          arr[i].divisi_id  = _str(F.divisi_id || arr[i].divisi_id);
+          arr[i].estate_id  = _str(F.estate_id || arr[i].estate_id);
+          arr[i].rayon_id   = _str(F.rayon_id  || arr[i].rayon_id);
+          arr[i].updated_at = new Date().toISOString();
+          found = true; break;
+        }
+      }
+      if(!found){
+        arr.push({
+          nomor: nomorNow,
+          periode: fPeriode(F.periode),
+          divisi_id: _str(F.divisi_id),
+          estate_id: _str(F.estate_id),
+          rayon_id:  _str(F.rayon_id),
+          status: statusNow,
+          username: SESSION.profile()?.username || '',
+          updated_at: new Date().toISOString()
+        });
+      }
+      U.S.set(key, arr);
+    };
+    patchActualsKey('kpl.actual.rkb');
+    patchActualsKey('rkb');
 
-    // Opsional: arahkan ke daftar / tarik ulang actuals
-    // location.hash = '#/rkb/list'; // jika ada halaman list
-    // window.Pages?.home?.pullAll?.(); // jika punya tombol "Tarik Master & Data Aktual"
+    // 4) (opsional) refresh actuals dari server agar konsisten
+    U.progress?.(88, 'Menyegarkan data…');
+    try{ await API.call?.('pullMaster', {}); }catch(_){}
+
+    U.progress?.(100, 'Selesai');
+    U.toast?.('RKB berhasil dikirim (Submitted).', 'success');
+
+    // arahkan ke list rekap (jika ada)
+    location.hash = '#/rkb/list';
   }catch(err){
-    U.loading?.hide?.();
+    console.error(err);
+    U.progress?.(100, 'Gagal');
     U.toast?.(String(err.message || err), 'danger');
+  }finally{
+    setTimeout(()=> U.progressClose?.(), 250);
   }
 }
+
 
 
   // ====== Create PDO Draft dari RKB (tetap disertakan seperti versi Anda) ======

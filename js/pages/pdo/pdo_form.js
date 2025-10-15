@@ -2227,45 +2227,135 @@ ${footerActions()}
   };
 }
 
+// ===== Backend URL resolver (gunakan urutan prioritas + fallback ke GAS_URL) =====
+function resolveBackendUrl(){
+  return (
+    SESSION.backendUrl?.() ||
+    U.S.get('backend.url') ||
+    window.APP_BACKEND_URL ||
+    window.GAS_URL || // fallback ke GAS_URL dari index.html
+    ''
+  );
+}
+
+// pdo_form.js
 async function syncToServer(){
   if (!validateBeforeSave()) return;
 
   const payload = buildPayloadReplace();
+  payload.action = 'pdoReplace';
+  payload.token  = (typeof SESSION?.token === 'function') ? SESSION.token() : payload.token;
+  payload.row = payload.row || {};
+  payload.row.status = 'submitted';
 
-  // Ganti URL di bawah ini sesuai URL Web App GAS Anda
-  const BACKEND_URL = SESSION.backendUrl?.() || U.S.get('backend.url') || window.APP_BACKEND_URL;
-
+  const BACKEND_URL = resolveBackendUrl();
   if (!BACKEND_URL){
     U.alert('BACKEND_URL belum diset. Harap set URL web app di konfigurasi.');
     return;
   }
 
+  let nomorNow = payload?.row?.nomor || (window.F && F.nomor);
+
   try{
-    U.block?.('Menyinkronkan PDO ke server...');
-    const res = await fetch(BACKEND_URL, {
+    // === PROGRESS START ===
+    U.progressOpen('Menyiapkan data…');             // 0%
+    U.progress(10,'Validasi & packing payload');    // 10%
+
+    // kirim
+    U.progress(35,'Mengirim data ke server…');      // 35%
+    const res  = await fetch(BACKEND_URL, {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
     });
-    const json = await res.json();
+
+    U.progress(55,'Menunggu respon…');              // 55%
+    const text = await res.text();
+
+    U.progress(65,'Memproses respon…');             // 65%
+    let json = {};
+    try { json = JSON.parse(text); } catch(_){}
 
     if (!json.ok){
+      U.progress(100,'Gagal');                      // 100% (gagal)
       U.toast(json.error || 'Gagal sync', 'danger');
-      U.unblock?.();
       return;
     }
 
-    // Sukses
-    F.status = json.status || F.status || 'draft';
-    U.S.set('pdo.form.buffer', F);
+    nomorNow = nomorNow || json.nomor;
+    const statusNow = (json.status || 'submitted');
 
-    // Opsional: update cache actuals lokal setelah sync (jika Anda punya mekanisme pull otomatis, boleh dilewati)
-    U.toast('Sync ke server berhasil (Full Replace).', 'success');
+    // === UPDATE LOCAL CACHE ===
+    U.progress(75,'Memperbarui cache lokal…');      // 75%
+
+    // pdo.form.buffer
+    let buf = U.S.get('pdo.form.buffer', {}) || {};
+    if (String(buf?.nomor||'') === String(nomorNow||'')) {
+      buf.status     = statusNow;
+      buf.updated_at = new Date().toISOString();
+      U.S.set('pdo.form.buffer', buf);
+    } else if (window.F && String(F.nomor||'') === String(nomorNow||'')) {
+      F.status     = statusNow;
+      F.updated_at = new Date().toISOString();
+      U.S.set('pdo.form.buffer', F);
+    }
+
+    // hapus draft
+    ['kpl.actual.pdo_draft', 'pdo.draft'].forEach(DKEY=>{
+      let drafts = U.S.get(DKEY, []) || [];
+      const idx = drafts.findIndex(x => String(x.nomor) === String(nomorNow));
+      if (idx > -1){ drafts.splice(idx,1); U.S.set(DKEY, drafts); }
+    });
+
+    // patch kpl.actual.pdo
+    const ACT_KEY = 'kpl.actual.pdo';
+    let actuals = U.S.get(ACT_KEY, []) || [];
+    let found = false;
+    for (let i=0;i<actuals.length;i++){
+      if (String(actuals[i].nomor) === String(nomorNow)){
+        actuals[i].status     = statusNow;
+        actuals[i].updated_at = new Date().toISOString();
+        if (json.total_rp != null) actuals[i].total_rp = Number(json.total_rp)||0;
+        if (!actuals[i].username && SESSION?.profile) {
+          actuals[i].username = SESSION.profile()?.username || actuals[i].username;
+        }
+        found = true; break;
+      }
+    }
+    if (!found){
+      actuals.push({
+        nomor: nomorNow,
+        periode: payload.row.periode || '',
+        divisi_id: payload.row.divisi_id || '',
+        estate_id: payload.row.estate_id || '',
+        rayon_id:  payload.row.rayon_id  || '',
+        ref_rkb:   payload.row.ref_rkb   || '',
+        total_rp:  Number(json.total_rp ?? 0),
+        status:    statusNow,
+        created_ts: payload.row.created_ts || '',
+        updated_at: new Date().toISOString(),
+        username:  SESSION?.profile?.().username || ''
+      });
+    }
+    U.S.set(ACT_KEY, actuals);
+
+    U.progress(88,'Menyegarkan data…');             // 88%
+    try { await API.call?.('pullMaster', {}); } catch(_){}
+
+    U.S.set('pdo.form.readonly', true);
+
+    U.progress(100,'Selesai');                      // 100%
+    U.toast('Sync ke server berhasil. Status: SUBMITTED', 'success');
+
+    // pindah ke list
+    location.hash = '#/pdo/list';
   }catch(err){
     console.error(err);
+    U.progress(100,'Gagal');                        // 100% (gagal)
     U.toast('Gagal terhubung ke server.', 'danger');
   }finally{
-    U.unblock?.();
+    // tutup progress dengan sedikit jeda biar user lihat 100%
+    setTimeout(()=>U.progressClose(), 250);
   }
 }
 
@@ -2326,6 +2416,15 @@ async function syncToServer(){
   // ======== Bootstrap init ========
   (async function init() {
     await ensureWarm();
+    try{
+      if (!window.APP_BACKEND_URL && window.GAS_URL){
+        window.APP_BACKEND_URL = window.GAS_URL;
+      }
+      if (!U.S.get('backend.url') && window.GAS_URL){
+        U.S.set('backend.url', window.GAS_URL);
+      }
+    }catch(_){}
+
     if (!requireLocalYratesOrRedirect()) return;
     requireLocalActivitiesOrWarn();
 

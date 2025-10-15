@@ -47,7 +47,12 @@ function doPost(e){
       getPdoDetail,
 
       // RKH
-      createRKHFromRKB, pushRKH, getRkhDetail
+      createRKHFromRKB, pushRKH, getRkhDetail,
+
+        // === Full Replace API ===
+      pdoReplace,
+      rkbReplace 
+
     };
     if(!map[action]) return json({ok:false, error:'Unknown action'});
     return json(map[action](body, user));
@@ -345,6 +350,104 @@ function getUserFromSession(sess){
 }
 
 
+function rkbReplace(body, sess){
+  ensureRKB(); ensureRkbColumns_(); ensureRKBItems(); ensureRKBBahan();
+  const me = getUserFromSession(sess);
+  const H = body.header || {};
+  const L = Array.isArray(body.items) ? body.items : [];
+
+  const nomor = (H.nomor||'').toString().trim();
+  if (!nomor) return {ok:false, error:'nomor wajib'};
+
+  // Hapus detail lama
+  clearDetailsByNomor(nomor);
+
+  // Hitung hk_total header dari items baru
+  const hk_total = L.reduce((acc, it) => {
+    const base = (Number(it.volume)||0) * (Number(it.hk_unit)||0);
+    const pct  = (Number(it.pct_bhl)||0) + (Number(it.pct_sku)||0) + (Number(it.pct_bhb)||0);
+    return acc + base * (pct/100);
+  }, 0);
+
+  // Lengkapi scope bila kosong
+  const scope = resolveScopeFromRow_(Object.assign({}, H, {username: me.username}));
+
+  const header = Object.assign({
+    nomor,
+    periode: H.periode||'',
+    status: (H.status||'draft'),
+    username: me.username||'',
+    asisten_ts: H.asisten_ts || sigWIB(),
+    askep_ts: H.askep_ts || '',
+    manager_ts: H.manager_ts || '',
+    created_at: nowIso(),
+    updated_at: nowIso()
+  }, scope, { hk_total });
+
+  upsertRow(sh(SHEETS.RKB), 'nomor', header);
+
+  // Tulis items + bahan (insert all)
+  const si = ensureRKBItems();
+  const sb = ensureRKBBahan();
+  const hi = si.getRange(1,1,1,si.getLastColumn()).getValues()[0];
+  const hb = sb.getRange(1,1,1,sb.getLastColumn()).getValues()[0];
+
+  const rowsI = [];
+  const rowsB = [];
+
+  L.forEach((it, i) => {
+    const idx = Number(it.idx || (i+1));
+    const lokasiStr = lokasiToString_(it.lokasi);
+
+    const base = (Number(it.volume)||0) * (Number(it.hk_unit)||0);
+    const hk_bhl = base * ((Number(it.pct_bhl)||0)/100);
+    const hk_sku = base * ((Number(it.pct_sku)||0)/100);
+    const hk_bhb = base * ((Number(it.pct_bhb)||0)/100);
+    const hk_tot = hk_bhl + hk_sku + hk_bhb;
+
+    const objI = {
+      nomor, idx,
+      pekerjaan: it.pekerjaan||'',
+      activity_type: it.activity_type||'',
+      lokasi: lokasiStr,
+      volume: it.volume||'',
+      satuan: it.satuan||'',
+      hk_unit: it.hk_unit||'',
+      pct_bhl: it.pct_bhl||'',
+      pct_sku: it.pct_sku||'',
+      pct_bhb: it.pct_bhb||'',
+      hk_bhl, hk_sku, hk_bhb, hk_total: hk_tot,
+      pengawas: it.pengawas||'',
+      created_at: nowIso()
+    };
+    rowsI.push(hi.map(h => objI[h]!==undefined ? objI[h] : ''));
+
+    (it.bahan||[]).forEach(b => {
+      const objB = {
+        nomor,
+        item_idx: idx,
+        no_material: getNoMaterial_(b),
+        nama: b.nama||'',
+        jumlah: b.jumlah||'',
+        satuan: b.satuan||'',
+        created_at: nowIso()
+      };
+      rowsB.push(hb.map(h => objB[h]!==undefined ? objB[h] : ''));
+    });
+  });
+
+  if (rowsI.length){
+    const startI = si.getLastRow()+1;
+    si.getRange(startI,1,rowsI.length,hi.length).setValues(rowsI);
+  }
+  if (rowsB.length){
+    const startB = sb.getLastRow()+1;
+    sb.getRange(startB,1,rowsB.length,hb.length).setValues(rowsB);
+  }
+
+  return {ok:true, nomor, hk_total, status: header.status};
+}
+
 /** Master pull **/
 function pullMaster(body, sess){
   ensureMasters(); ensureRKB(); ensureComments(); ensureRKBItems(); ensureRKBBahan();
@@ -579,6 +682,17 @@ const summary = {
 
   // === Hapus detail lama, siapkan sheet detail ===
   clearDetailsByNomor(row.nomor);
+  
+  // Hapus semua detail PDO untuk 1 nomor
+  function pdoClearDetails_(nomor){
+    const s = ensurePDOItems();
+    const all = getAll(s);
+    for (let i = all.length - 1; i >= 0; i--){
+      if (String(all[i].nomor) === String(nomor)){
+        s.deleteRow(i + 2); // +2 karena header di baris 1
+      }
+    }
+  }
 
   const si = ensureRKBItems();
   const sb = ensureRKBBahan();
@@ -833,31 +947,62 @@ function managerApprove(body, sess){
 }
 /** KTU Rekap **/
 function ktuRekap(body, sess){
-  const rows = getAll(sh(SHEETS.RKB)).filter(x=> x.status==='full_approved');
-  const nomorSet = new Set(rows.map(r=> r.nomor));
-  const itemsB = getAll(sh(SHEETS.RKB_BAHAN)).filter(b=> nomorSet.has(b.nomor));
+  // Pastikan sheet ada
+  ensureRKB(); ensureRKBItems(); ensureRKBBahan();
+
+  // Ambil RKB yang sudah FULL APPROVE saja
+  const rkbRows = getAll(sh(SHEETS.RKB))
+    .filter(x => String(x.status||'').toLowerCase() === 'full_approved');
+
+  // Index cepat header RKB per nomor
+  const mapR = Object.fromEntries(rkbRows.map(r => [String(r.nomor), r]));
+  const nomorSet = new Set(Object.keys(mapR));
+
+  // Ambil detail bahan & items untuk pekerjaan
+  const itemsB = getAll(sh(SHEETS.RKB_BAHAN)).filter(b => nomorSet.has(String(b.nomor)));
+  const itemsI = getAll(sh(SHEETS.RKB_ITEMS)).filter(i => nomorSet.has(String(i.nomor)));
+
+  // pekerjaanByKey: "nomor|idx" => pekerjaan
+  const pekerjaanByKey = Object.fromEntries(
+    itemsI.map(i => [`${i.nomor}|${i.idx}`, i.pekerjaan])
+  );
 
   const items = [];
   const sum = {};
 
-  // Per item bahan, butuh map pekerjaan dari rkb_items
-  const itemsI = getAll(sh(SHEETS.RKB_ITEMS)).filter(i=> nomorSet.has(i.nomor));
-  // pekerjaanByNomorIdx: key "nomor|idx" => pekerjaan
-  const pekerjaanByKey = Object.fromEntries(itemsI.map(i=> [`${i.nomor}|${i.idx}`, i.pekerjaan]));
-
-  itemsB.forEach(b=>{
+  itemsB.forEach(b => {
+    const head = mapR[String(b.nomor)] || {};
     const keyNI = `${b.nomor}|${b.item_idx}`;
     const pekerjaan = pekerjaanByKey[keyNI] || '';
-    items.push({ nomor:b.nomor, divisi: (rows.find(r=>r.nomor===b.nomor)||{}).divisi, periode:(rows.find(r=>r.nomor===b.nomor)||{}).periode, pekerjaan, nama:b.nama, jumlah:b.jumlah, satuan:b.satuan||'' });
-    const key = (b.nama||'') + '|' + (b.satuan||'');
-    sum[key] = (sum[key]||0) + Number(b.jumlah||0);
+
+    const nama   = b.nama || '';
+    const satuan = b.satuan || '';
+    const jumlah = Number(b.jumlah || 0);
+    const no_material = String(b.no_material || ''); // ← KIRIMKAN KE FE
+
+    items.push({
+      nomor: b.nomor,
+      periode: head.periode || '',
+      divisi: head.divisi || head.divisi_id || '',
+      pekerjaan,
+      no_material,               // ← field baru di payload
+      nama,
+      jumlah,
+      satuan
+    });
+
+    // Agregasi total estate (tetap seperti sebelumnya — per nama+satuan)
+    const key = nama + '|' + satuan;
+    sum[key] = (sum[key] || 0) + jumlah;
   });
 
-  const total = Object.entries(sum).map(([k,v])=>{
-    const [nama, satuan] = k.split('|'); return {nama, total:v, satuan};
+  const total = Object.entries(sum).map(([k, v]) => {
+    const [nama, satuan] = k.split('|'); return { nama, total: v, satuan };
   });
-  return {ok:true, items, total};
+
+  return { ok: true, items, total };
 }
+
 
 /** ================== Admin: Master CRUD ================== **/
 function isAdmin(userSess){
@@ -1235,6 +1380,116 @@ const PDO_SHEETS = {
   PDO_COMMENTS: 'pdo_comments'
 };
 
+function pdoReplace(body, sess){
+  ensurePDO(); ensurePDOItems();
+  const me   = getUserFromSession(sess);
+  const row  = body.row   || {};
+  const it   = body.items || {};
+  const hk   = Array.isArray(it.hk) ? it.hk : [];
+  const bor  = Array.isArray(it.borongan) ? it.borongan : [];
+
+  const nomor = (row.nomor || '').toString().trim();
+  if (!nomor) return {ok:false, error:'nomor wajib'};
+  const refRkb = (row.ref_rkb || '').toString().trim();
+
+  // Enforce: 1 RKB = 1 PDO (kecuali jika update nomor yg sama)
+  if (refRkb){
+    const sHdr = ensurePDO();
+    const allHdr = getAll(sHdr);
+    const dupe = allHdr.find(r =>
+      String(r.ref_rkb||'').toLowerCase() === refRkb.toLowerCase() &&
+      String(r.nomor) !== nomor
+    );
+    if (dupe) return {ok:false, error:`Ref. RKB ${refRkb} sudah memiliki PDO ${dupe.nomor}`};
+  }
+
+  // Totals
+  const totalHK   = hk.reduce((a,b)=> a + Number(b.total_rp||0), 0);
+  const totalBor  = bor.reduce((a,b)=> a + Number(b.total_rp||0), 0);
+  const premiP    = Number(row.premi_panen||0);
+  const premiN    = Number(row.premi_non_panen||0);
+  const totalRp   = totalHK + totalBor + premiP + premiN;
+
+  const status = (row.status ? String(row.status) : 'submitted');
+
+  // Header summary (upsert)
+  const summary = {
+    nomor,
+    periode: row.periode||'',
+    estate_id: String(row.estate_id ?? me.estate_id ?? '').trim(),
+    rayon_id:  String(row.rayon_id  ?? me.rayon_id  ?? '').trim(),
+    divisi_id: row.divisi_id || me.divisi_id || me.divisi || '',
+    ref_rkb: refRkb,
+    upah_hk_bhl: Number(row.upah_hk_bhl||0),
+    upah_hk_sku: Number(row.upah_hk_sku||0),
+    target_produksi_ton: Number(row.target_produksi_ton||0),
+    premi_panen: premiP,
+    premi_non_panen: premiN,
+    total_rp: totalRp,
+    status: status,                                 // ← penting
+    asst_ts: row.created_ts || nowSigWIB(),         // TTD Asisten
+    // Jangan ubah ts Askep/Manager di replace biasa; biarkan kosong jika belum approve lagi:
+    askep_ts: row.askep_ts || '',
+    manager_ts: row.manager_ts || '',
+    created_by: me.username||'',
+    created_at: nowIso(),
+    updated_at: nowIso()
+  };
+  upsertRow(ensurePDO(), 'nomor', summary);
+
+  // REPLACE detail
+  clearPDOItemsByNomor(nomor);
+  const sItm = ensurePDOItems();
+  const head = sItm.getRange(1,1,1,sItm.getLastColumn()).getValues()[0];
+
+  const rows = [];
+
+  // HK
+  hk.forEach((r, i) => {
+    const obj = {
+      nomor,
+      tipe_item: 'HK',
+      activity_type: (r.activity_type||''),
+      idx: i+1,
+      pekerjaan: (r.pekerjaan||''),
+      satuan: (r.satuan||''),
+      luas_ha: Number(r.luas_ha||0),
+      hk: Number(r.hk||0),
+      tipe_hk: String(r.tipe||'').toUpperCase(), // 'SKU' | 'BHL'
+      total_rp: Number(r.total_rp||0),
+      qty: '',                     // kosong utk HK
+      tarif_borongan: ''           // kosong utk HK
+    };
+    rows.push(head.map(h => obj[h]!==undefined ? obj[h] : ''));
+  });
+
+  // BORONGAN
+  bor.forEach((r, j) => {
+    const obj = {
+      nomor,
+      tipe_item: 'BOR',
+      activity_type: (r.activity_type||''),
+      idx: j+1,
+      pekerjaan: (r.pekerjaan||''),
+      satuan: (r.satuan||''),
+      luas_ha: '',                 // kosong utk BOR
+      hk: '',                      // kosong utk BOR
+      tipe_hk: '',                 // kosong utk BOR
+      total_rp: Number(r.total_rp||0),
+      qty: Number(r.qty||0),
+      tarif_borongan: Number(r.tarif_borongan||0)
+    };
+    rows.push(head.map(h => obj[h]!==undefined ? obj[h] : ''));
+  });
+
+  if (rows.length){
+    const start = sItm.getLastRow() + 1;
+    sItm.getRange(start, 1, rows.length, head.length).setValues(rows);
+  }
+
+  return {ok:true, nomor, total_rp: totalRp, status};
+}
+
 // WIB timestamp "DD/MM/YY-hh:mm:ss" → untuk tanda tangan digital
 function nowSigWIB(){
   const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
@@ -1542,20 +1797,30 @@ function pdoManagerApprove(body, sess){
 function ktuRekapPDO(body, sess){
   ensurePDO();
   const m = mastersAsMap();
+
+  // Ambil semua PDO, lalu mapping ke payload ringkas untuk FE
   const rows = getAll(ensurePDO()).map(r=>{
-    const est = m._idx.estateById[String(r.estate_id||'')]||{};
-    const ray = m._idx.rayonById[String(r.rayon_id||'')]||{};
+    const est = m._idx.estateById[String(r.estate_id||'')] || {};
+    const ray = m._idx.rayonById[String(r.rayon_id||'')]   || {};
+
     return {
-      nomor: r.nomor,
-      periode: r.periode||'',
-      divisi_id: r.divisi_id||'',
-      rayon_kode: ray.kode||ray.kd_rayon||'',
-      estate_nama: est.nama||est.nama_panjang||'',
-      total_rp: Number(r.total_rp||0),
+      nomor      : r.nomor,
+      periode    : r.periode || '',
+      divisi_id  : r.divisi_id || '',
+      rayon_kode : (ray.kode || ray.kd_rayon || ''),
+      // penting: pakai nama_panjang dulu agar match dengan filter FE
+      estate_nama: (est.nama_panjang || est.nama || ''),
+      total_rp   : Number(r.total_rp || 0),
+
+      // === tambahkan status ke FE ===
+      // biarkan apa adanya (lowercase). FE sudah normalize ke UPPER.
+      status     : (r.status || '')    // 'draft' | 'submitted' | 'askep_approved' | 'full_approved' | ...
     };
   });
-  return {ok:true, rows};
+
+  return { ok:true, rows };
 }
+
 
 function getPdoDetail(body, sess){
   const nomor = (body.nomor||'').toString().trim();

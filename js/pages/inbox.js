@@ -1,10 +1,14 @@
 // js/pages/inbox.js
+// ====================================================================
+// INBOX GABUNGAN (RKB + PDO + Inbox Umum)
+// ====================================================================
+
 window.Pages = window.Pages || {};
 Pages.inbox = function(){
-  // ===== Root container =====
+  // ===== Root =====
   const root = U.qs('#app-root');
 
-  // ===== Inject style hanya sekali (untuk badge read/unread & table compact) =====
+  // ===== Styles sekali saja =====
   (function ensureInboxStyles(){
     if(document.getElementById('inbox-css')) return;
     const css = `
@@ -19,9 +23,13 @@ Pages.inbox = function(){
     const s = document.createElement('style'); s.id='inbox-css'; s.textContent=css; document.head.appendChild(s);
   })();
 
-  // ===== Key penyimpanan lokal (cache) & outbox actions (untuk antrean offline) =====
-  const ACT_KEY    = 'kpl.actual.inbox';
-  const OUTBOX_ACT = 'kpl.outbox.actions';
+  // ===== Kunci penyimpanan lokal & antrean aksi offline =====
+  const ACT_KEY    = 'kpl.actual.inbox';   // cache gabungan yang ditampilkan
+  const OUTBOX_ACT = 'kpl.outbox.actions'; // antrean aksi network (offline)
+
+  // ====================================================================
+  // UTIL & HELPERS
+  // ====================================================================
 
   function getActualInbox(){ return U.S.get(ACT_KEY, []) || []; }
   function setActualInbox(rows){ U.S.set(ACT_KEY, rows||[]); }
@@ -31,7 +39,7 @@ Pages.inbox = function(){
     U.S.set(OUTBOX_ACT, q);
   }
 
-  // ===== Formatter waktu & periode =====
+  // Format WIB untuk waktu & periode
   function toLocalTime(s){
     if(!s) return '-';
     try{
@@ -39,10 +47,6 @@ Pages.inbox = function(){
       return new Intl.DateTimeFormat('id-ID',{ timeZone:'Asia/Jakarta', dateStyle:'medium', timeStyle:'short' }).format(d);
     }catch(_){ return s; }
   }
-  // Normalisasi periode ke "YYYY-MM":
-  // - Jika string sudah "YYYY-MM" → kembalikan apa adanya.
-  // - Jika ISO "YYYY-MM-DDT..." → ambil "YYYY-MM" (hindari pergeseran TZ).
-  // - Selain itu, coba Date parse → format ke "YYYY-MM" WIB.
   function toPeriodeWIB(p){
     if(!p) return '-';
     const s = String(p).trim();
@@ -53,75 +57,48 @@ Pages.inbox = function(){
     const m = new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',month:'2-digit'}).format(d);
     return `${y}-${m}`;
   }
-
-  // ===== Utility kecil untuk pemilihan kolom yang toleran nama =====
-  function _lc(v){ return (v==null?'':String(v)).trim().toLowerCase(); }
   function _pick(o, keys){
     for(const k of keys){ if(o && o[k]!=null && String(o[k]).trim()!=='') return o[k]; }
     return '';
   }
+  function fmtCount(n){ return new Intl.NumberFormat('id-ID').format(n); }
 
-  // ====== Mapper: baris dari pdo_comments → format unified inbox row ======
-  function _mapPdoCommentRow(row){
-    const nomor = String(_pick(row, [
-      'nomor','no_pdo','pdo_no','kode','no','nomor_pdo','pdo_nomor'
-    ]) || '').trim();
-
-    const periode = _pick(row, [
-      'periode','period','bulan','month','bulan_periode'
-    ]) || '';
-
-    const divisi = _pick(row, [
-      'divisi','divisi_id','divisi_kode','kd_divisi','kode_divisi','divisi_nama'
-    ]) || '';
-
-    const role = _pick(row, [
-      'role','from_role','sender_role','role_from'
-    ]) || 'ASKEP';
-
-    const username = _pick(row, [
-      'username','created_by','sender','user','by','oleh'
-    ]) || '';
-
-    const comment = _pick(row, [
-      'comment','komentar','message','catatan','comment_text','pesan','alasan'
-    ]) || '';
-
-    const createdAt = _pick(row, [
-      'created_at','created_ts','created','ts','tanggal','createdAt'
-    ]) || new Date().toISOString();
-
-    // `read_at` dari server kadang string kosong → normalisasikan ke null
-    let readAt = _pick(row, ['read_at','read_ts','dibaca_ts']);
-    if (String(readAt).trim()==='') readAt = null;
-
-    const id = _pick(row, ['id','row_id','_id']) || `${nomor}|${createdAt}|PDO`;
-
-    return {
-      id,
-      module: 'PDO',   // penanda modul
-      nomor,
-      periode,
-      divisi,
-      comment,
-      role,
-      username,
-      created_at: createdAt,
-      read_at: readAt
-    };
+  // Key unik untuk deduplikasi
+  function _keyOf(r){
+    return `${String(r.module||'').toUpperCase()}|${String(r.nomor||'')}|${String(r.created_at||'')}`;
   }
 
-  // ===== Kolektor: ambil komentar PDO dari STORE actuals lokal =====
-  // Mencoba beberapa key kandidat, memetakan ke format unified, dan mengembalikan array.
+  // Merge unik (primary menang, extra hanya ditambah jika belum ada)
+  function _mergeInboxUnique(primary, extra){
+    const used = new Set((primary||[]).map(_keyOf));
+    const add  = (extra||[]).filter(r => !used.has(_keyOf(r)));
+    return (primary||[]).concat(add);
+  }
+
+  // ====================================================================
+  // MAPPER & KOLEKTOR KOMENTAR (PDO + RKB)
+  // ====================================================================
+
+  // ---- PDO: map 1 baris komentar → unified row
+  function _mapPdoCommentRow(row){
+    const nomor = String(_pick(row, ['nomor','no_pdo','pdo_no','kode','no','nomor_pdo','pdo_nomor'])||'').trim();
+    const periode = _pick(row, ['periode','period','bulan','month','bulan_periode']) || '';
+    const divisi = _pick(row, ['divisi','divisi_id','divisi_kode','kd_divisi','kode_divisi','divisi_nama']) || '';
+    const role = _pick(row, ['role','from_role','sender_role','role_from']) || 'ASKEP';
+    const username = _pick(row, ['username','created_by','sender','user','by','oleh']) || '';
+    const comment = _pick(row, ['comment','komentar','message','catatan','comment_text','pesan','alasan']) || '';
+    const createdAt = _pick(row, ['created_at','created_ts','created','ts','tanggal','createdAt']) || new Date().toISOString();
+    let readAt = _pick(row, ['read_at','read_ts','dibaca_ts']); if (String(readAt).trim()==='') readAt = null;
+    const id = _pick(row, ['id','row_id','_id']) || `${nomor}|${createdAt}|PDO`;
+
+    return { id, module:'PDO', nomor, periode, divisi, comment, role, username, created_at: createdAt, read_at: readAt };
+  }
+
+  // ---- PDO: kumpulkan dari STORE actuals (mencoba beberapa kunci)
   function _collectPdoCommentsAsInbox(){
     let src = [];
     if (typeof STORE?.getActual === 'function'){
-      const cand = [
-        'kpl.actual.pdo_comments', // nama yang semula diperkirakan
-        'pdo_comments',            // nama yang terkonfirmasi aktif
-        'kpl.actual.pdo_comment',  // antisipasi singular
-        'pdo_comment'
-      ];
+      const cand = ['kpl.actual.pdo_comments','pdo_comments','kpl.actual.pdo_comment','pdo_comment'];
       for(const k of cand){
         const v = STORE.getActual(k);
         if (Array.isArray(v) && v.length){ src = v; break; }
@@ -131,63 +108,134 @@ Pages.inbox = function(){
     return src.map(_mapPdoCommentRow).filter(r => r.nomor || r.comment);
   }
 
-  // ===== Merger unik berdasarkan (module + nomor + created_at) =====
-  function _mergeInboxUnique(primary, extra){
-    const keyOf = r => `${String(r.module||'').toUpperCase()}|${String(r.nomor||'')}` +
-                       `|${String(r.created_at||'')}`;
-    const used = new Set((primary||[]).map(keyOf));
-    const add  = (extra||[]).filter(r => !used.has(keyOf(r)));
-    return (primary||[]).concat(add);
+  // ---- RKB: map 1 baris komentar → unified row
+  function _mapRkbCommentRow(row){
+    const nomor = String(_pick(row, ['nomor','no_rkb','rkb_no','kode','no'])||'').trim();
+    const periode = _pick(row, ['periode','period','bulan','month']) || '';
+    const divisi = _pick(row, ['divisi','divisi_id','divisi_kode','kd_divisi','kode_divisi','divisi_nama']) || '';
+    const role = _pick(row, ['role','from_role','sender_role','role_from']) || 'ASKEP';
+    const username = _pick(row, ['username','created_by','sender','user','by','oleh']) || '';
+    const comment = _pick(row, ['comment','komentar','message','catatan','comment_text','pesan','alasan']) || '';
+    const createdAt = _pick(row, ['created_at','created_ts','created','ts','tanggal','createdAt']) || new Date().toISOString();
+    let readAt = _pick(row, ['read_at','read_ts','dibaca_ts']); if (String(readAt).trim()==='') readAt = null;
+    const id = _pick(row, ['id','row_id','_id']) || `${nomor}|${createdAt}|RKB`;
+
+    return { id, module:'RKB', nomor, periode, divisi, comment, role, username, created_at: createdAt, read_at: readAt };
   }
 
-  // ===== State UI =====
-  let allRows = [];          // kumpulan pesan (gabungan inbox umum + PDO)
-  let onlyUnread = false;    // filter toggle
-  let q = '';                // keyword pencarian
-  let page = 1;              // halaman
-  let pageSize = 20;         // ukuran halaman
+  // ---- RKB: kumpulkan dari STORE actuals (mencoba beberapa kunci)
+  function _collectRkbCommentsAsInbox(){
+    let src = [];
+    if (typeof STORE?.getActual === 'function'){
+      const cand = ['kpl.actual.rkb_comments','rkb_comments','kpl.actual.rkb_comment','rkb_comment'];
+      for(const k of cand){
+        const v = STORE.getActual(k);
+        if (Array.isArray(v) && v.length){ src = v; break; }
+      }
+    }
+    if(!Array.isArray(src) || !src.length) return [];
+    return src.map(_mapRkbCommentRow).filter(r => r.nomor || r.comment);
+  }
 
-  // ===== Loader utama =====
-  // preferLocal=true → gunakan cache & STORE lokal terlebih dahulu.
-  // Jika kosong, ambil dari server (inboxList + pullMaster) lalu gabungkan dengan pdo_comments.
+  // ====================================================================
+  // BADGE GLOBAL — menghitung unread dari cache + komentar RKB+PDO
+  // ====================================================================
+  (function ensureInboxBadgeUpdater(){
+  if (window.updateInboxBadge) return;
+
+  window.updateInboxBadge = function(){
+    try{
+      const cached = U.S.get('kpl.actual.inbox', []) || [];
+      const unread = cached.reduce((n, r) => n + (r && !r.read_at ? 1 : 0), 0);
+
+      // Cari elemen badge (beberapa kemungkinan selector)
+      const selectors = ['#menu-inbox-badge','#nav-inbox .badge','[data-badge="inbox"]','.js-inbox-badge'];
+      let el = null;
+      for (const sel of selectors) {
+        const cand = document.querySelector(sel);
+        if (cand) { el = cand; break; }
+      }
+
+      if (el) {
+        if (unread > 0) {
+          el.textContent = String(unread);
+          el.classList.remove('d-none','visually-hidden');
+          el.setAttribute('aria-label', `Pesan belum dibaca: ${unread}`);
+          el.title = `${unread} pesan belum dibaca`;
+        } else {
+          el.textContent = '';
+          el.classList.add('d-none');
+          el.removeAttribute('title');
+          el.removeAttribute('aria-label');
+        }
+      }
+
+      // Broadcast opsional ke komponen lain
+      try { document.dispatchEvent(new CustomEvent('inbox:badge', { detail: { unread } })); } catch(_) {}
+      return unread;
+    } catch(_) {
+      return 0;
+    }
+  };
+
+  // Refresh ringan berkala & saat tab aktif
+  try {
+    setInterval(() => { try { window.updateInboxBadge(); } catch(_) {} }, 15000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { try { window.updateInboxBadge(); } catch(_) {} }
+    });
+  } catch(_) {}
+})();
+
+  // ====================================================================
+  // STATE UI
+  // ====================================================================
+  let allRows = [];       // data gabungan yang dirender
+  let onlyUnread = false; // filter toggle
+  let q = '';             // keyword pencarian
+  let page = 1;           // halaman
+  let pageSize = 20;      // ukuran halaman
+
+  // ====================================================================
+  // LOADER UTAMA (cache-first → server)
+  // ====================================================================
   async function load(preferLocal=true){
     try{
-      // 1) Cabang cache lokal
+      // ---- 1) Cache-first (gabungkan cache + komentar RKB + PDO)
       if(preferLocal){
         const cached = getActualInbox();
         let baseRows = Array.isArray(cached) ? cached.slice() : [];
 
-        // Pastikan STORE hangat agar getActual(...) siap
         if (typeof STORE?.ensureWarm === 'function') await STORE.ensureWarm();
-
+        const rkbRows = _collectRkbCommentsAsInbox();
         const pdoRows = _collectPdoCommentsAsInbox();
-        allRows = _mergeInboxUnique(baseRows, pdoRows)
+
+        allRows = _mergeInboxUnique(_mergeInboxUnique(baseRows, rkbRows), pdoRows)
           .sort((a,b)=> new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-        // Simpan hasil merge ke cache supaya halaman lain juga memperoleh daftar terbaru
         setActualInbox(allRows);
-
+        updateInboxBadge && updateInboxBadge();
         if(allRows.length){ render(); return; }
-        // Jika tidak ada data sama sekali, lanjut ke server fetch di bawah
+        // jika cache kosong, lanjut ambil dari server
       }
 
-      // 2) Ambil dari server (inbox umum), lalu tarik actuals agar pdo_comments lokal terisi
+      // ---- 2) Server fetch (inbox umum) + pull actuals (agar rkb/pdo comments segar)
       U.progressOpen('Memuat pesan...'); U.progress(30,'Ambil dari server');
 
-      // Inbox umum dari server
       const r = await API.call('inboxList', { onlyUnread:false });
       const base = r.ok && Array.isArray(r.rows) ? r.rows : [];
 
-      // Tarik actuals (agar kunci pdo_comments ikut diperbarui)
       try{ await API.call('pullMaster', {}); }catch(_){ /* optional */ }
-
       if (typeof STORE?.ensureWarm === 'function') await STORE.ensureWarm();
+
+      const rkbRows = _collectRkbCommentsAsInbox();
       const pdoRows = _collectPdoCommentsAsInbox();
 
-      allRows = _mergeInboxUnique(base, pdoRows)
+      allRows = _mergeInboxUnique(_mergeInboxUnique(base, rkbRows), pdoRows)
         .sort((a,b)=> new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-      setActualInbox(allRows); // cache-kan hasil
+      setActualInbox(allRows);
+      updateInboxBadge && updateInboxBadge();
       render();
     }catch(e){
       root.innerHTML = `<div class="alert alert-danger">Gagal memuat: ${e.message||e}</div>`;
@@ -197,7 +245,9 @@ Pages.inbox = function(){
     }
   }
 
-  // ===== Tandai pesan sudah dibaca (optimistic update + kirim ke server/antrean) =====
+  // ====================================================================
+  // TANDAI PESAN SUDAH DIBACA (optimistic + kirim / antre)
+  // ====================================================================
   async function markRead(row){
     // 1) Update lokal (optimistic)
     const idx = allRows.findIndex(x =>
@@ -211,27 +261,40 @@ Pages.inbox = function(){
       updateInboxBadge && updateInboxBadge();
     }
 
-    // 2) Kirim ke server sesuai modul (PDO atau inbox umum)
+    // 2) Kirim ke server sesuai modul
     try{
-      if(String(row.module||'').toUpperCase()==='PDO'){
+      const mod = String(row.module||'').toUpperCase();
+      if(mod==='PDO'){
         const payload = { nomor: row.nomor, created_at: row.created_at };
         const res = await API.call('pdoCommentMarkRead', payload);
         if(!res.ok) throw new Error(res.error||'Gagal update PDO comment');
+      }else if(mod==='RKB'){
+        // Jika ada endpoint khusus RKB:
+        let res = {ok:false};
+        try{ res = await API.call('rkbCommentMarkRead', { nomor: row.nomor, created_at: row.created_at }); }catch(_){}
+        // Fallback ke inbox umum jika endpoint RKB belum tersedia:
+        if(!res?.ok){
+          const fb = await API.call('inboxMarkRead', { nomor: row.nomor, created_at: row.created_at });
+          if(!fb.ok) throw new Error(fb.error||'Gagal update RKB comment');
+        }
       }else{
         const payload = row.id ? {id: row.id} : {nomor: row.nomor, created_at: row.created_at};
         const res = await API.call('inboxMarkRead', payload);
         if(!res.ok) throw new Error(res.error||'Gagal update inbox');
       }
     }catch(e){
-      // Offline/endpoint tidak tersedia → antrekan
+      // Offline/endpoint tidak ada → antrekan
+      const mod = String(row.module||'').toUpperCase();
       const payload = row.id ? {id: row.id} : {nomor: row.nomor, created_at: row.created_at};
-      const action  = (String(row.module||'').toUpperCase()==='PDO') ? 'pdoCommentMarkRead' : 'inboxMarkRead';
+      const action  = (mod==='PDO') ? 'pdoCommentMarkRead' : (mod==='RKB' ? 'rkbCommentMarkRead' : 'inboxMarkRead');
       queueAction(action, payload);
       U.toast('Offline: penandaan dibaca diantrikan.','warning');
     }
   }
 
-  // ===== Filter & paginasi =====
+  // ====================================================================
+  // FILTER & PAGINASI
+  // ====================================================================
   function applyFilter(rows){
     let arr = onlyUnread ? rows.filter(r=> !r.read_at) : rows.slice();
     const qq = q.trim().toLowerCase();
@@ -247,9 +310,10 @@ Pages.inbox = function(){
   function getPaged(rows){
     const pc=pageCountOf(rows); if(page>pc) page=pc; const s=(page-1)*pageSize; return rows.slice(s, s+pageSize);
   }
-  function fmtCount(n){ return new Intl.NumberFormat('id-ID').format(n); }
 
-  // ===== Render shell (toolbar, table, pager) =====
+  // ====================================================================
+  // RENDER SHELL (toolbar, table, pager)
+  // ====================================================================
   function render(){
     root.innerHTML = `
       <div class="card shadow-sm"><div class="card-body">
@@ -296,7 +360,7 @@ Pages.inbox = function(){
       </div></div>
     `;
 
-    // Wiring toolbar
+    // Toolbar events
     const inp = U.qs('#inbox-search'); inp.value = q;
     inp.addEventListener('input', ()=>{ q=inp.value; page=1; renderTable(); renderPager(); });
     U.qs('#inbox-pagesize').onchange = (e)=>{ pageSize=+e.target.value||20; page=1; renderTable(); renderPager(); };
@@ -307,7 +371,9 @@ Pages.inbox = function(){
     renderTable(); renderPager();
   }
 
-  // ===== Render baris tabel (dengan mark-as-read on click) =====
+  // ====================================================================
+  // RENDER TABEL & PAGER
+  // ====================================================================
   function renderTable(){
     const tb = U.qs('#msg-rows');
     const filtered = applyFilter(allRows);
@@ -323,14 +389,17 @@ Pages.inbox = function(){
       const unread  = !r.read_at;
       const dotCls  = unread ? 'dot dot-unread' : 'dot dot-read';
       const trClass = unread ? ' class="table-warning"' : '';
-      const module  = (r.module || 'INBOX').toString().toUpperCase();
+      const module  = (r.module || 'RKB').toString().toUpperCase();
+      const badgeCls =
+        module==='PDO' ? 'text-bg-danger' :
+        module==='RKB' ? 'text-bg-primary' : 'text-bg-secondary';
 
       return `
         <tr${trClass} data-id="${r.id||''}">
           <td class="text-center"><span class="${dotCls}" title="${unread?'Belum dibaca':'Sudah dibaca'}"></span></td>
           <td>${toLocalTime(r.created_at)}</td>
           <td class="hide-sm">${(r.role||'-')} (${r.username||'-'})</td>
-          <td><span class="badge ${module==='PDO'?'text-bg-danger':'text-bg-secondary'}">${module}</span></td>
+          <td><span class="badge ${badgeCls}">${module}</span></td>
           <td><code>${r.nomor||'-'}</code></td>
           <td class="hide-sm">${r.divisi||'-'}</td>
           <td>${toPeriodeWIB(r.periode)}</td>
@@ -338,7 +407,7 @@ Pages.inbox = function(){
         </tr>`;
     }).join('');
 
-    // Klik baris → tandai read (optimistic + antrean offline bila gagal)
+    // Klik baris → tandai read
     const slice2 = getPaged(filtered);
     tb.querySelectorAll('tr').forEach((tr, i)=>{
       const row = slice2[i];
@@ -352,7 +421,6 @@ Pages.inbox = function(){
     U.qs('#inbox-info').textContent = `${fmtCount(startIdx)}–${fmtCount(endIdx)} dari ${fmtCount(filtered.length)} pesan`;
   }
 
-  // ===== Render pager =====
   function renderPager(){
     const ul = U.qs('#inbox-pager');
     const filtered = applyFilter(allRows);
@@ -384,6 +452,8 @@ Pages.inbox = function(){
     ul.appendChild(pageLi('»', Math.min(pc,page+1), page>=pc));
   }
 
-  // ===== Initial load: cache-first =====
+  // ====================================================================
+  // GO: initial load (cache-first)
+  // ====================================================================
   load(true);
 };

@@ -345,6 +345,75 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 }
 
+
+  // ===== Helpers global reset lokal =====
+  async function appHardResetAll() {
+    try{
+      // 1) clear localStorage & sessionStorage
+      try{ localStorage.clear(); }catch(_){}
+      try{ sessionStorage.clear(); }catch(_){}
+
+      // 2) hapus Cache Storage (PWA) jika ada
+      try{
+        if ('caches' in window && typeof caches.keys === 'function') {
+          const names = await caches.keys();
+          await Promise.all(names.map(n => caches.delete(n)));
+        }
+      }catch(_){}
+
+      // 3) hapus IndexedDB (best-effort)
+      try{
+        if (window.indexedDB && typeof indexedDB.databases === 'function') {
+          const dbs = await indexedDB.databases();
+          await Promise.all((dbs||[]).map(db=>{
+            if (!db || !db.name) return Promise.resolve();
+            return new Promise((resolve)=> {
+              const req = indexedDB.deleteDatabase(db.name);
+              req.onsuccess = req.onerror = req.onblocked = ()=> resolve();
+            });
+          }));
+        }
+        // kalau browser belum support indexedDB.databases(), abaikan (best-effort)
+      }catch(_){}
+
+      // 4) unregister service worker (kalau ada)
+      try{
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map(r => r.unregister()));
+        }
+      }catch(_){}
+
+      // 5) clear session app (kalau objectnya masih ada)
+      try{ SESSION.clear && SESSION.clear(); }catch(_){}
+    }finally{
+      // tidak ada
+    }
+  }
+
+  // Soft reset: hapus cache aplikasi tapi TIDAK logout (dipakai di halaman Home)
+  function appSoftResetCache(){
+    const APP_PREFIXES = [
+      'kpl.master.', 'kpl.actual.', 'kpl.counter.', 'kpl.cache.',
+      'rkb.', 'pdo.', 'rkh.', 'ktu.', 'inbox.', 'outbox.', 'settings.',
+    ];
+    const APP_EXACT = [
+      'kpl.cache.ts',
+      'pdo.form.buffer','pdo.form.readonly','kpl.actual.pdo_draft',
+      'rkb.form.buffer','rkb.form.readonly',
+      'rkh.form.buffer','rkh.form.readonly'
+    ];
+    const removeKeys = (shouldRemoveFn) => {
+      const keys = Object.keys(localStorage);
+      for (const k of keys) { try{ if (shouldRemoveFn(k)) localStorage.removeItem(k); }catch(_){ } }
+    };
+    removeKeys((k)=> APP_EXACT.includes(k) || APP_PREFIXES.some(p=> k.startsWith(p)));
+  }
+
+  // Ekspos ke global bila perlu dipanggil dari modul lain
+  window.AppLocal = { hardReset: appHardResetAll, softReset: appSoftResetCache };
+
+
   function renderHome(){
     const div = document.createElement('div');
     div.className='card shadow-sm';
@@ -478,119 +547,42 @@ window.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Hapus Data Lokal (soft / hard reset) ---
-btnClear.onclick = async ()=>{
-  const mode = prompt(
-    'Ketik "TOTAL" untuk reset total (hapus SEMUA data lokal & logout).\n' +
-    'Atau kosongkan lalu OK untuk hapus cache aplikasi (tetap login).'
-  );
+    btnClear.onclick = async ()=>{
+      const mode = prompt(
+        'Ketik "TOTAL" untuk reset TOTAL (hapus SEMUA data lokal & logout).\n' +
+        'Atau kosongkan lalu OK untuk hanya hapus cache aplikasi (tetap login).'
+      );
 
-  // ========= util hapus kunci localStorage by rule =========
-  const removeKeys = (shouldRemoveFn) => {
-    const keys = Object.keys(localStorage);
-    for (const k of keys) {
-      try{
-        if (shouldRemoveFn(k)) localStorage.removeItem(k);
-      }catch(_){}
-    }
-  };
-
-  // ========= SOFT RESET: hapus cache aplikasi, tetap login =========
-  const doSoftReset = () => {
-    // Prefix/kunci yang dianggap milik aplikasi (aman dihapus)
-    const APP_PREFIXES = [
-      'kpl.master.', 'kpl.actual.', 'kpl.counter.', 'kpl.cache.',
-      'rkb.', 'pdo.', 'rkh.', 'ktu.', 'inbox.', 'outbox.', 'settings.',
-    ];
-    const APP_EXACT = [
-      'kpl.cache.ts',
-      'pdo.form.buffer', 'pdo.form.readonly',
-      'kpl.actual.pdo_draft',            // <— draft PDO
-      'rkb.form.buffer', 'rkb.form.readonly',
-      'rkh.form.buffer', 'rkh.form.readonly'
-    ];
-
-    removeKeys((k)=>{
-      if (APP_EXACT.includes(k)) return true;
-      if (APP_PREFIXES.some(p=> k.startsWith(p))) return true;
-      return false;
-    });
-
-    // segarkan UI
-    div.querySelector('#home-pull-log').textContent =
-      'Cache aplikasi dibersihkan. Silakan tarik ulang bila perlu.';
-    updateHomeCacheStatus();
-    updateInboxBadge();
-    U.toast('Cache aplikasi dihapus. Sesi login tetap aktif.', 'warning');
-  };
-
-  // ========= HARD RESET: hapus SEMUA storage & cache =========
-  const doHardReset = async () => {
-    try{
-      // 1) localStorage: hapus SEMUA (termasuk SESSION & theme)
-      localStorage.clear();
-    }catch(_){}
-
-    try{
-      // 2) sessionStorage: bersihkan
-      sessionStorage.clear();
-    }catch(_){}
-
-    try{
-      // 3) Cache Storage (PWA/Service Worker caches)
-      if ('caches' in window && typeof caches.keys === 'function') {
-        const names = await caches.keys();
-        await Promise.all(names.map(n=> caches.delete(n)));
+      if (String(mode||'').toUpperCase() === 'TOTAL'){
+        const really = confirm('Yakin reset TOTAL? Ini akan menghapus SEMUA data lokal & logout.');
+        if(!really) return;
+        let opened=false;
+        try{
+          opened = U.safeProgressOpen ? U.safeProgressOpen('Reset total...') : false;
+          if(opened) U.progress(40,'Membersihkan penyimpanan');
+          await appHardResetAll();
+          if(opened) U.progress(90,'Kembali ke login');
+          buildMenu(); routeTo('#/login');
+          U.toast('Reset total selesai. Silakan login kembali.','warning');
+        }finally{
+          try{ U.progress(100,'Selesai'); }catch(_){}
+          setTimeout(()=>{ try{ U.progressClose(); U.progressHardClose && U.progressHardClose(); }catch(_){} }, 150);
+        }
+        return;
       }
-    }catch(_){}
 
-    try{
-      // 4) IndexedDB: hapus semua database (best-effort; tidak semua browser support .databases())
-      if (indexedDB && typeof indexedDB.databases === 'function') {
-        const dbs = await indexedDB.databases();
-        await Promise.all((dbs||[]).map(db=>{
-          if (db && db.name) return new Promise((resolve)=> {
-            const req = indexedDB.deleteDatabase(db.name);
-            req.onsuccess = req.onerror = req.onblocked = ()=> resolve();
-          });
-          return Promise.resolve();
-        }));
-      } else {
-        // fallback: jika tahu nama DB, bisa hapus manual di sini
-        // contoh: ['kpl-cache','app-db'].forEach(n=> indexedDB.deleteDatabase(n));
-      }
-    }catch(_){}
+      // Soft reset (hapus cache, tetap login)
+      const ok = confirm('Hapus cache aplikasi (master, actuals, draft, counters) tetapi tetap login?');
+      if(!ok) return;
 
-    try{
-      // 5) Unregister service workers (jika ada)
-      if ('serviceWorker' in navigator) {
-        const regs = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(regs.map(r=> r.unregister()));
-      }
-    }catch(_){}
+      appSoftResetCache();
+      // segarkan status panel & badge
+      div.querySelector('#home-pull-log').textContent = 'Cache aplikasi dibersihkan.';
+      (function updateHomeCacheStatusSafe(){ try{ updateHomeCacheStatus(); }catch(_){ } })();
+      try{ updateInboxBadge(); }catch(_){}
+      U.toast('Cache aplikasi dihapus. Sesi login tetap aktif.','warning');
+    };
 
-    U.toast('Reset total selesai. Anda akan diminta login ulang.', 'warning');
-    // paksa ke login
-    SESSION.clear && SESSION.clear();
-    buildMenu();
-    routeTo('#/login');
-  };
-
-  if (String(mode||'').toUpperCase() === 'TOTAL') {
-    const really = confirm('Yakin reset TOTAL? Ini akan menghapus SEMUA data lokal & logout.');
-    if (!really) return;
-    try { await doHardReset(); } finally {
-      try{ U.progressClose(); }catch(_){}
-    }
-    return;
-  }
-
-  // default: soft reset (hapus cache aplikasi saja)
-  const reallySoft = confirm(
-    'Hapus cache aplikasi (master, actuals, draft RKB/PDO, counters) tetapi tetap login?'
-  );
-  if (!reallySoft) return;
-  doSoftReset();
-};
 
     // Ubah password
     div.querySelector('#btn-change-pass').onclick = async ()=>{
@@ -608,9 +600,25 @@ btnClear.onclick = async ()=>{
     };
   }
 
-  btnLogout.onclick = ()=>{
-    SESSION.clear(); buildMenu(); routeTo('#/login');
+    btnLogout.onclick = async ()=>{
+    const ok = confirm('Anda yakin ingin keluar dari aplikasi?\nSemua data lokal di perangkat ini akan dihapus agar aman.');
+    if(!ok) return;
+
+    let opened = false;
+    try{
+      await appHardResetAll();  // reset total + SESSION.clear()
+      try{ buildMenu(); }catch(_){}
+      routeTo('#/login');
+      U.toast && U.toast('Anda telah logout. Data lokal dibersihkan.', 'warning');
+    }catch(e){
+      U.toast && U.toast('Gagal membersihkan sebagian data: ' + (e.message||e), 'danger');
+      // tetap arahkan ke login agar sesi berakhir
+      routeTo('#/login');
+    }finally{
+      setTimeout(()=>{}, 150);
+    }
   };
+
 
   // Theme toggle
   btnTheme.onclick = ()=>{
