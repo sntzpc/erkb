@@ -167,23 +167,16 @@ Pages.pdoForm = function () {
   const saveDebounced = U.debounce(() => U.S.set(DKEY, F), 150);
 
   (function ensurePdoFormStyles() {
-    if (document.getElementById("pdo-form-tweaks")) return;
-    const css = `
-  /* kolom pekerjaan lebih lebar */
+  if (document.getElementById("pdo-form-tweaks")) return;
+  const css = `
+  /* === COMMON === */
   .pdo-pekerjaan-input { min-width: 320px; }
-  /* biar sel total bisa wrap */
   .pdo-total-cell { white-space: nowrap; }
   .is-invalid { outline: 2px solid #dc3545 !important; }
 
-  /* === VALIDASI NILAI TIDAK WAJAR (TOTAL) === */
-  .pdo-total-cell.warn-yellow{
-    background: #fff3cd !important; /* bootstrap warning-ish */
-    position: relative;
-  }
-  .pdo-total-cell.warn-red{
-    background: #f8d7da !important; /* bootstrap danger-ish */
-    position: relative;
-  }
+  /* === FLAG TOTAL === */
+  .pdo-total-cell.warn-yellow{ background:#fff3cd !important; position:relative; }
+  .pdo-total-cell.warn-red{    background:#f8d7da !important; position:relative; }
   .pdo-total-cell .verify-badge{
     position:absolute; right:6px; top:50%; transform: translateY(-50%);
     font-size:.85rem; line-height:1; opacity:.9;
@@ -192,21 +185,70 @@ Pages.pdoForm = function () {
   .pdo-verify-modal dt{ font-weight:600; }
   .pdo-verify-modal code{ background:#f6f8fa; padding:.1rem .35rem; border-radius:4px; }
 
+  /* === SCROLLABLE TABLE (HK & BORONGAN) === */
+  .pdo-scroll-x{
+    overflow-x:auto;
+    -webkit-overflow-scrolling: touch;
+    cursor: grab;
+  }
+  .pdo-scroll-x:active{ cursor: grabbing; }
+  .pdo-table{
+    /* paksa tabel lebih lebar dari viewport agar bisa di-scroll */
+    min-width: 980px;     /* boleh disesuaikan */
+    table-layout: auto;
+  }
+  /* Sticky kolom nomor biar enak saat geser (opsional, tapi membantu) */
+  .pdo-table th.sticky-col, .pdo-table td.sticky-col{
+    position: sticky; left: 0; z-index: 2; background: #fff;
+  }
+  .pdo-table thead th.sticky-col{ z-index: 3; }
 
+  /* Kolom aksi kanan juga bisa dibuat sticky agar tombol tetap terlihat (opsional) */
+  .pdo-table th.sticky-col-right, .pdo-table td.sticky-col-right{
+    position: sticky; right: 0; z-index: 2; background: #fff;
+  }
+  .pdo-table thead th.sticky-col-right{ z-index: 3; }
+
+  /* Biar sel-sel input tidak kependekan */
+  .pdo-table td input.form-control,
+  .pdo-table td select.form-select{
+    min-width: 140px;
+  }
+  .pdo-table td .pdo-pekerjaan-input{
+    min-width: 260px;
+  }
+
+  /* === MOBILE OVERRIDES === */
   @media (max-width: 768px){
-    /* di mobile: pekerjaan full-width, sel jangan sempit */
-    .pdo-pekerjaan-input { min-width: 0; width: 100%; }
-    .table-responsive table { table-layout: auto; }
-    .table-responsive td, .table-responsive th { white-space: nowrap; }
-    /* header inputs biar nggak dempet */
-    .pdo-header .form-control, .pdo-header .form-select { min-height: 42px; }
+    /* 1) Samakan ukuran field mobile = desktop */
+    .form-control-sm,
+    .form-select-sm{
+      /* override ukuran 'sm' Bootstrap agar setara .form-control biasa */
+      padding: .375rem .75rem;
+      font-size: 1rem;
+      line-height: 1.5;
+      border-radius: .375rem;
+      height: auto; /* cegah kependekan */
+    }
+
+    /* 2) Jangan perkecil pekerjaan di mobile */
+    .pdo-pekerjaan-input { min-width: 260px; width: 100%; }
+
+    /* 3) Pastikan header inputs nyaman disentuh */
+    .pdo-header .form-control, .pdo-header .form-select { min-height: 44px; }
+
+    /* 4) Pastikan tabel memang bisa di-swipe */
+    .pdo-scroll-x{ overflow-x:auto; }
+    .pdo-table{ min-width: 980px; }
+    .pdo-table td, .pdo-table th{ white-space: nowrap; }
   }
   `;
-    const s = document.createElement("style");
-    s.id = "pdo-form-tweaks";
-    s.textContent = css;
-    document.head.appendChild(s);
-  })();
+  const s = document.createElement("style");
+  s.id = "pdo-form-tweaks";
+  s.textContent = css;
+  document.head.appendChild(s);
+})();
+
 
   function ensureDebugPanel() {
     if (!DEBUG) return;
@@ -1126,22 +1168,18 @@ function ensureHKTypeNormalized(){
   }
 
   function hkBlock() {
-    return `
+  return `
   <div class="card mb-3">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <strong>Pekerjaan HK</strong>
-        ${
-          READONLY
-            ? ""
-            : `<button class="btn btn-sm btn-outline-primary" id="btn-add-hk">Tambah Baris</button>`
-        }
+        ${ READONLY ? "" : `<button class="btn btn-sm btn-outline-primary" id="btn-add-hk">Tambah Baris</button>` }
       </div>
-      <div class="table-responsive">
-        <table class="table table-sm table-striped align-middle">
+      <div class="table-responsive pdo-scroll-x">
+        <table class="table table-sm table-striped align-middle pdo-table">
           <thead class="table-light">
             <tr>
-              <th style="width:38px">#</th>
+              <th class="sticky-col" style="width:38px">#</th>
               <th>Activity Type</th>
               <th>Jenis Pekerjaan</th>
               <th>Satuan</th>
@@ -1149,138 +1187,97 @@ function ensureHKTypeNormalized(){
               <th>HK</th>
               <th>Tipe HK</th>
               <th class="text-end">Total (Rp)</th>
-              <th style="width:80px"></th>
+              <th class="sticky-col-right" style="width:80px"></th>
             </tr>
           </thead>
           <tbody>
-            ${(F.hk || [])
-              .map(
-                (it, i) => `
+            ${(F.hk || []).map((it, i) => `
               <tr data-row-type="hk" data-idx="${i}">
-                <td>${i + 1}</td>
+                <td class="sticky-col">${i + 1}</td>
                 <td>
                   <input type="text" class="form-control form-control-sm"
                     list="list-activity-type" data-sec="hk" data-k="activity_type" data-i="${i}"
-                    placeholder="ketik kode/tipe..." value="${
-                      it.activity_type || ""
-                    }" ${READONLY ? "disabled" : ""}/>
+                    placeholder="ketik kode/tipe..." value="${it.activity_type || ""}" ${READONLY ? "disabled" : ""}/>
                 </td>
                 <td>
                   <input type="text" class="form-control form-control-sm pdo-pekerjaan-input"
                     data-sec="hk" data-k="pekerjaan" data-i="${i}"
                     value="${it.pekerjaan || ""}" disabled />
                 </td>
-                <td><input class="form-control form-control-sm" data-sec="hk" data-k="satuan" data-i="${i}" value="${
-                  it.satuan || ""
-                }" ${READONLY ? "disabled" : ""}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="luas_ha" data-i="${i}" value="${
-                  it.luas_ha || 0
-                }" ${READONLY ? "disabled" : ""}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="hk" data-i="${i}" value="${
-                  it.hk || 0
-                }" ${READONLY ? "disabled" : ""}/></td>
+                <td><input class="form-control form-control-sm" data-sec="hk" data-k="satuan" data-i="${i}" value="${it.satuan || ""}" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="luas_ha" data-i="${i}" value="${it.luas_ha || 0}" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="hk" data-k="hk" data-i="${i}" value="${it.hk || 0}" ${READONLY ? "disabled" : ""}/></td>
                 <td>
-                  <select class="form-select form-select-sm" data-sec="hk" data-k="tipe" data-i="${i}" ${
-                  READONLY ? "disabled" : ""
-                }>
-                    <option value="SKU" ${
-                      String(it.tipe || "") === "SKU" ? "selected" : ""
-                    }>SKU</option>
-                    <option value="BHL" ${
-                      String(it.tipe || "") === "BHL" ? "selected" : ""
-                    }>BHL</option>
+                  <select class="form-select form-select-sm" data-sec="hk" data-k="tipe" data-i="${i}" ${READONLY ? "disabled" : ""}>
+                    <option value="SKU" ${String(it.tipe || "") === "SKU" ? "selected" : ""}>SKU</option>
+                    <option value="BHL" ${String(it.tipe || "") === "BHL" ? "selected" : ""}>BHL</option>
                   </select>
                 </td>
-                <td class="text-end pdo-total-cell" data-total-cell="hk-${i}">${fmtIDR(
-                  it.total_rp || 0
-                )}</td>
-                <td>${
-                  READONLY
-                    ? ""
-                    : `<button class="btn btn-sm btn-danger" data-del-hk="${i}">Hapus</button>`
-                }</td>
+                <td class="text-end pdo-total-cell" data-total-cell="hk-${i}">${fmtIDR(it.total_rp || 0)}</td>
+                <td class="sticky-col-right">
+                  ${ READONLY ? "" : `<button class="btn btn-sm btn-danger" data-del-hk="${i}">Hapus</button>` }
+                </td>
               </tr>
-            `
-              )
-              .join("")}
+            `).join("")}
           </tbody>
         </table>
       </div>
     </div>
   </div>`;
-  }
+}
 
   function boronganBlock() {
-    return `
+  return `
   <div class="card mb-3">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <strong>Pekerjaan Borongan</strong>
-        ${
-          READONLY
-            ? ""
-            : `<button class="btn btn-sm btn-outline-primary" id="btn-add-bor">Tambah Baris</button>`
-        }
+        ${ READONLY ? "" : `<button class="btn btn-sm btn-outline-primary" id="btn-add-bor">Tambah Baris</button>` }
       </div>
-      <div class="table-responsive">
-        <table class="table table-sm table-striped align-middle">
+      <div class="table-responsive pdo-scroll-x">
+        <table class="table table-sm table-striped align-middle pdo-table">
           <thead class="table-light">
             <tr>
-              <th style="width:38px">#</th>
+              <th class="sticky-col" style="width:38px">#</th>
               <th>Activity Type</th>
               <th>Jenis Pekerjaan</th>
               <th>Satuan</th>
               <th>Qty</th>
               <th>Tarif Borongan</th>
               <th class="text-end">Total (Rp)</th>
-              <th style="width:80px"></th>
+              <th class="sticky-col-right" style="width:80px"></th>
             </tr>
           </thead>
           <tbody>
-            ${(F.borongan || [])
-              .map(
-                (it, i) => `
+            ${(F.borongan || []).map((it, i) => `
               <tr data-row-type="bor" data-idx="${i}">
-                <td>${i + 1}</td>
+                <td class="sticky-col">${i + 1}</td>
                 <td>
                   <input type="text" class="form-control form-control-sm"
                     list="list-activity-type" data-sec="bor" data-k="activity_type" data-i="${i}"
-                    placeholder="ketik kode/tipe..." value="${
-                      it.activity_type || ""
-                    }" ${READONLY ? "disabled" : ""}/>
+                    placeholder="ketik kode/tipe..." value="${it.activity_type || ""}" ${READONLY ? "disabled" : ""}/>
                 </td>
                 <td>
                   <input type="text" class="form-control form-control-sm pdo-pekerjaan-input"
                     data-sec="bor" data-k="pekerjaan" data-i="${i}"
                     value="${it.pekerjaan || ""}" disabled />
                 </td>
-                <td><input class="form-control form-control-sm" data-sec="bor" data-k="satuan" data-i="${i}" value="${
-                  it.satuan || ""
-                }" ${READONLY ? "disabled" : ""}/></td>
-                <td><input type="number" class="form-control form-control-sm" data-sec="bor" data-k="qty" data-i="${i}" value="${
-                  it.qty || 0
-                }" ${READONLY ? "disabled" : ""}/></td>
-                <td><input type="text" class="form-control form-control-sm" data-sec="bor" data-k="tarif_borongan" data-i="${i}" value="${fmtIDR(
-                  it.tarif_borongan || 0
-                )}" ${READONLY ? "disabled" : ""}/></td>
-                <td class="text-end pdo-total-cell" data-total-cell="bor-${i}">${fmtIDR(
-                  it.total_rp || 0
-                )}</td>
-                <td>${
-                  READONLY
-                    ? ""
-                    : `<button class="btn btn-sm btn-danger" data-del-bor="${i}">Hapus</button>`
-                }</td>
+                <td><input class="form-control form-control-sm" data-sec="bor" data-k="satuan" data-i="${i}" value="${it.satuan || ""}" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="number" class="form-control form-control-sm" data-sec="bor" data-k="qty" data-i="${i}" value="${it.qty || 0}" ${READONLY ? "disabled" : ""}/></td>
+                <td><input type="text" class="form-control form-control-sm" data-sec="bor" data-k="tarif_borongan" data-i="${i}" value="${fmtIDR(it.tarif_borongan || 0)}" ${READONLY ? "disabled" : ""}/></td>
+                <td class="text-end pdo-total-cell" data-total-cell="bor-${i}">${fmtIDR(it.total_rp || 0)}</td>
+                <td class="sticky-col-right">
+                  ${ READONLY ? "" : `<button class="btn btn-sm btn-danger" data-del-bor="${i}">Hapus</button>` }
+                </td>
               </tr>
-            `
-              )
-              .join("")}
+            `).join("")}
           </tbody>
         </table>
       </div>
     </div>
   </div>`;
-  }
+}
+
 
   function updateHeaderTotalsUI() {
     // Update kolom total di header saja (tanpa render penuh)
@@ -1963,8 +1960,38 @@ ${footerActions()}
         }
       );
     }
+    U.qsa('.pdo-scroll-x', root).forEach(enableGrabScroll);
     updateHeaderTotalsUI(); decorateAllTotals();
   }
+
+  function enableGrabScroll(el){
+  if (!el) return;
+  let isDown = false, startX = 0, scrollLeft = 0;
+
+  const onDown = (e) => {
+    isDown = true;
+    startX = (e.touches ? e.touches[0].pageX : e.pageX) - el.offsetLeft;
+    scrollLeft = el.scrollLeft;
+    el.classList.add('is-grabbing');
+  };
+  const onMove = (e) => {
+    if (!isDown) return;
+    e.preventDefault();
+    const x = (e.touches ? e.touches[0].pageX : e.pageX) - el.offsetLeft;
+    const walk = (x - startX); // drag positif → scroll kanan
+    el.scrollLeft = scrollLeft - walk;
+  };
+  const onUp = () => { isDown = false; el.classList.remove('is-grabbing'); };
+
+  el.addEventListener('mousedown', onDown);
+  el.addEventListener('mousemove', onMove);
+  el.addEventListener('mouseleave', onUp);
+  el.addEventListener('mouseup', onUp);
+
+  el.addEventListener('touchstart', onDown, {passive:false});
+  el.addEventListener('touchmove', onMove,   {passive:false});
+  el.addEventListener('touchend', onUp,      {passive:true});
+}
 
   // ======== VALIDATION ========
   function clearValidationMarks() {

@@ -1,6 +1,6 @@
 {
-  "name": "RKB App - Karyamas Plantation",
-  "short_name": "RKB App",
+  "name": "PLAN App - Karyamas Plantation",
+  "short_name": "eRKB",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0b1a0c",
