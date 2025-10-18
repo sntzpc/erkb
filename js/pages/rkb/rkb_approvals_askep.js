@@ -298,9 +298,10 @@ function openDetailModal({header: h, items, bahan}){
 
       if(a==='view'){ showDetail(r.nomor); return; }
 
-      if(a==='comment'){
+      // --- COMMENT (REJECT) — REPLACE isi try/catch finally pada cabang a==='comment' ---
+      if (a === 'comment') {
         const text = prompt('Tulis komentar perbaikan untuk Asisten:');
-        if(!text) return;
+        if (!text) return;
         try{
           setBusy(true);
           const s = await API.call('askepComment', { nomor: r.nomor, text });
@@ -308,7 +309,15 @@ function openDetailModal({header: h, items, bahan}){
 
           const act = getActualRkb();
           const idx = act.findIndex(x=> x.nomor===r.nomor);
-          if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          if(idx>=0){
+            const now = new Date().toISOString();
+            const row = act[idx];
+            row.status = 'draft';
+            row.updated_at = now;         // untuk sorting saja
+            // PENTING: jangan sentuh row.askep_ts / row.manager_ts
+            row.askep_reject_ts = now;    // opsional: jejak waktu reject
+            act[idx] = row; setActualRkb(act);
+          }
 
           tr.remove();
           U.toast('Komentar terkirim.','success');
@@ -316,7 +325,14 @@ function openDetailModal({header: h, items, bahan}){
           queueAction('askepComment', { nomor:r.nomor, text });
           const act = getActualRkb();
           const idx = act.findIndex(x=> x.nomor===r.nomor);
-          if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          if(idx>=0){
+            const now = new Date().toISOString();
+            const row = act[idx];
+            row.status = 'draft';
+            row.updated_at = now;
+            row.askep_reject_ts = now;    // opsional
+            act[idx] = row; setActualRkb(act);
+          }
           tr.remove();
           U.toast('Offline: komentar diantrikan ke Outbox.','warning');
         }finally{
@@ -325,7 +341,8 @@ function openDetailModal({header: h, items, bahan}){
         return;
       }
 
-      if(a==='approve'){
+      // --- APPROVE — REPLACE isi try/catch finally pada cabang a==='approve' ---
+      if (a === 'approve') {
         try{
           setBusy(true);
           const s = await API.call('askepApprove', { nomor: r.nomor });
@@ -333,7 +350,14 @@ function openDetailModal({header: h, items, bahan}){
 
           const act = getActualRkb();
           const idx = act.findIndex(x=> x.nomor===r.nomor);
-          if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          if(idx>=0){
+            const now = (s.askep_ts || s.ts || new Date().toISOString());
+            const row = act[idx];
+            row.status     = 'askep_approved';
+            row.askep_ts   = now;                // <- cap TTD Askep
+            row.updated_at = now;                // sinkron
+            act[idx] = row; setActualRkb(act);
+          }
 
           tr.remove();
           U.toast('Approved.','success');
@@ -341,13 +365,21 @@ function openDetailModal({header: h, items, bahan}){
           queueAction('askepApprove', { nomor:r.nomor });
           const act = getActualRkb();
           const idx = act.findIndex(x=> x.nomor===r.nomor);
-          if(idx>=0){ act[idx].status='askep_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+          if(idx>=0){
+            const now = new Date().toISOString(); // optimistic stamp
+            const row = act[idx];
+            row.status     = 'askep_approved';
+            row.askep_ts   = now;                 // <- cap TTD Askep (lokal)
+            row.updated_at = now;
+            act[idx] = row; setActualRkb(act);
+          }
           tr.remove();
           U.toast('Offline: approval diantrikan ke Outbox.','warning');
         }finally{
           setBusy(false);
         }
       }
+
     });
   });
 }

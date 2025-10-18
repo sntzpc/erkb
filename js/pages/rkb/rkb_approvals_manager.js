@@ -284,6 +284,7 @@ function openDetailModal({header:h, items, bahan}){
 
         if(a==='view'){ showDetail(r.nomor); return; }
 
+        // --- COMMENT (REJECT) ---
         if(a==='comment'){
           const text = prompt("Tulis komentar perbaikan untuk Asisten:"); if(!text) return;
           try{
@@ -293,7 +294,15 @@ function openDetailModal({header:h, items, bahan}){
 
             const act = getActualRkb();
             const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+            if(idx>=0){
+              const now = new Date().toISOString();
+              const row = act[idx];
+              row.status = 'draft';
+              row.updated_at = now;
+              // Jangan sentuh row.manager_ts / row.askep_ts
+              row.manager_reject_ts = now; // opsional
+              act[idx] = row; setActualRkb(act);
+            }
 
             tr.remove();
             U.toast("Komentar terkirim.","success");
@@ -301,13 +310,21 @@ function openDetailModal({header:h, items, bahan}){
             queueAction('managerComment', { nomor:r.nomor, text });
             const act = getActualRkb();
             const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='draft'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+            if(idx>=0){
+              const now = new Date().toISOString();
+              const row = act[idx];
+              row.status = 'draft';
+              row.updated_at = now;
+              row.manager_reject_ts = now; // opsional
+              act[idx] = row; setActualRkb(act);
+            }
             tr.remove();
             U.toast("Offline: komentar diantrikan ke Outbox.","warning");
           }finally{ setBusy(false); }
           return;
         }
 
+        // --- APPROVE ---
         if(a==='approve'){
           try{
             setBusy(true);
@@ -316,7 +333,14 @@ function openDetailModal({header:h, items, bahan}){
 
             const act = getActualRkb();
             const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='full_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+            if(idx>=0){
+              const now = (s.manager_ts || s.ts || new Date().toISOString());
+              const row = act[idx];
+              row.status      = 'full_approved';
+              row.manager_ts  = now;               // <- cap TTD Manager
+              row.updated_at  = now;
+              act[idx] = row; setActualRkb(act);
+            }
 
             tr.remove();
             U.toast("Approved.","success");
@@ -324,11 +348,19 @@ function openDetailModal({header:h, items, bahan}){
             queueAction('managerApprove', { nomor:r.nomor });
             const act = getActualRkb();
             const idx = act.findIndex(x=> x.nomor===r.nomor);
-            if(idx>=0){ act[idx].status='full_approved'; act[idx].updated_at=new Date().toISOString(); setActualRkb(act); }
+            if(idx>=0){
+              const now = new Date().toISOString(); // optimistic
+              const row = act[idx];
+              row.status      = 'full_approved';
+              row.manager_ts  = now;                // <- cap TTD Manager (lokal)
+              row.updated_at  = now;
+              act[idx] = row; setActualRkb(act);
+            }
             tr.remove();
             U.toast("Offline: approval diantrikan ke Outbox.","warning");
           }finally{ setBusy(false); }
         }
+
       });
     });
   }
