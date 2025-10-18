@@ -558,15 +558,11 @@ window.addEventListener('DOMContentLoaded', () => {
         if(!really) return;
         let opened=false;
         try{
-          opened = U.safeProgressOpen ? U.safeProgressOpen('Reset total...') : false;
-          if(opened) U.progress(40,'Membersihkan penyimpanan');
           await appHardResetAll();
-          if(opened) U.progress(90,'Kembali ke login');
           buildMenu(); routeTo('#/login');
           U.toast('Reset total selesai. Silakan login kembali.','warning');
         }finally{
-          try{ U.progress(100,'Selesai'); }catch(_){}
-          setTimeout(()=>{ try{ U.progressClose(); U.progressHardClose && U.progressHardClose(); }catch(_){} }, 150);
+          setTimeout(()=>{}, 150);
         }
         return;
       }

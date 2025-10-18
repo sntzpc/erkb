@@ -123,6 +123,39 @@ Pages.pdoForm = function () {
     return isNaN(n) ? 0 : n;
   }
 
+  // === Hydrator: isi instance form aktif dari seed (tanpa ganti route) ===
+async function hydrateFormFromSeed(seed){
+  // clone aman
+  F = JSON.parse(JSON.stringify(seed || {}));
+
+  // fallback profil & normalisasi minimal
+  F.divisi_id = String(F.divisi_id || profile.divisi || "").trim();
+  F.estate_id = String(F.estate_id || profile.estate_id || "").trim();
+  F.rayon_id  = String(F.rayon_id  || profile.rayon_id  || "").trim();
+
+  // nomor + timestamp jika belum ada
+  if (!F.nomor)      F.nomor = genNoPDO(F.divisi_id || profile.divisi || "XX");
+  if (!F.created_ts) F.created_ts = fmtStampWIB().sig;
+
+  // periode fallback (jika RKB header tidak punya)
+  if (!F.periode){
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    F.periode = `${d.getFullYear()}-${mm}`;
+  }
+
+  // siapkan rate, migrasi & prefill items dari RKB
+  bindRatesIfEmpty();
+  ensureHKTypeNormalized();
+
+  await preloadFromRKB(); // sudah include ensureWarm() & resolveActualNames()
+  (F.hk || []).forEach(r => backfillActivityFromName(r, false));
+  (F.borongan || []).forEach(r => backfillActivityFromName(r, true));
+  recomputeTotals();
+  render();
+}
+
+
   // Masker input sederhana: tampil rapi saat blur, bebas saat ketik
   function attachMaskText(id, kind, onChange) {
     const el = document.getElementById(id);
@@ -1693,34 +1726,37 @@ function openVerifyModal(sec, idx){
 
   function onPickRkbForNewPdo(nomorRkb) {
     if (_pdoHasRefRkb(nomorRkb)) {
-      U.alert(
-        "Setiap No. RKB hanya boleh memiliki 1 PDO.\nRKB terpilih sudah memiliki PDO."
-      );
+      U.alert("Setiap No. RKB hanya boleh memiliki 1 PDO.\nRKB terpilih sudah memiliki PDO.");
       return;
     }
-    const row = (_collectRKBHeaders() || []).find(
-      (x) => _rkbNomor(x) === nomorRkb
-    );
-    if (!row) {
-      U.alert("RKB tidak ditemukan di lokal.");
-      return;
-    }
+    const row = (_collectRKBHeaders() || []).find(x => _rkbNomor(x) === nomorRkb);
+    if (!row) { U.alert("RKB tidak ditemukan di lokal."); return; }
 
-    // Reset buffer → seed baru berdasarkan RKB
+    // Seed standar dari RKB
     const seed = _newPdoSeedFromRkb(row);
+
+    // Simpan ke buffer agar konsisten (mis. bila nanti pindah halaman)
     U.S.set("pdo.form.buffer", seed);
     U.S.del("pdo.form.readonly");
 
-    // Muat ulang form (init() akan generate nomor & prefill dari RKB)
-    location.hash = "#/pdo/form";
-
-    // tutup modal
+    // Tutup modal (kalau ada)
     try {
       const modalEl = document.getElementById("pdo-new-modal");
       const inst = bootstrap.Modal.getInstance(modalEl);
       if (inst) inst.hide();
     } catch (_) {}
+
+    // Jika kita SUDAH di route form, jangan set hash yang sama (router tidak re-init).
+    const onFormRoute = (location.hash.split("?")[0] === "#/pdo/form");
+    if (onFormRoute) {
+      // Langsung hidrasi instance aktif lalu render ulang
+      hydrateFormFromSeed(seed);
+    } else {
+      // Kalau dipanggil dari halaman lain, cukup redirect seperti biasa
+      location.hash = "#/pdo/form";
+    }
   }
+
 
   function decorateAllTotals(){
   (F.hk||[]).forEach((_,i)=> updateRowTotalCell('hk', i));
