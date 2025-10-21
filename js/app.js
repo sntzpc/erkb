@@ -8,51 +8,116 @@ window.addEventListener('DOMContentLoaded', () => {
   const activeUser = U.qs('#active-user');
 
   function renderLogin(){
-    root.innerHTML = `
-    <div class="row justify-content-center">
-      <div class="col-md-6">
-        <div class="card shadow-sm">
-          <div class="card-body">
-            <h4 class="mb-3">Masuk</h4>
-            <div class="mb-2"><label class="form-label">Username</label>
-              <input id="login-username" class="form-control" placeholder="admin" />
+  // BACA ENV (boleh kosong)
+  const envRaw = (window.Client && Client.get && Client.get()) 
+    ? Client.get() 
+    : (localStorage.getItem('client.env') || '');
+  const env = String(envRaw || '').toUpperCase();
+
+  root.innerHTML = `
+  <div class="row justify-content-center">
+    <div class="col-md-6">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start mb-2">
+            <h4 class="mb-0">Masuk</h4>
+            <div>
+              <!-- Badge default KOSONG jika belum ada pilihan -->
+              <span id="login-client-badge"
+                    class="badge ${env ? 'text-bg-info' : 'text-bg-secondary'} me-2">
+                Client: <b>${env || '-'}</b>
+              </span>
+              <button id="btn-switch-client" class="btn btn-sm btn-outline-primary">Ganti Client</button>
             </div>
-            <div class="mb-3"><label class="form-label">Password</label>
-              <input id="login-password" type="password" class="form-control" placeholder="user123" />
-            </div>
-            <div class="d-flex gap-2">
-              <button id="btn-login" class="btn btn-primary">
-                <span class="spinner-border spinner-border-sm d-none" id="login-spin"></span>
-                Login
-              </button>
-              <button id="btn-fill" class="btn btn-outline-secondary">Isi default</button>
-            </div>
+          </div>
+
+          <div class="mb-2">
+            <label class="form-label">Username</label>
+            <input id="login-username" class="form-control" placeholder="admin" />
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Password</label>
+            <input id="login-password" type="password" class="form-control" placeholder="user123" />
+          </div>
+          <div class="d-flex gap-2">
+            <button id="btn-login" class="btn btn-primary">
+              <span class="spinner-border spinner-border-sm d-none" id="login-spin"></span>
+              Login
+            </button>
+            <button id="btn-fill" class="btn btn-outline-secondary">Isi default</button>
           </div>
         </div>
       </div>
-    </div>`;
+    </div>
+  </div>`;
 
-    U.qs('#btn-fill').onclick = ()=>{
-      U.qs('#login-username').value='admin';
-      U.qs('#login-password').value='user123';
-    };
-    U.qs('#btn-login').onclick = async ()=>{
-      const u = U.qs('#login-username').value.trim();
-      const p = U.qs('#login-password').value;
-      const spin = U.qs('#login-spin'); U.safe.remove(spin, 'd-none');
-      try{
-        const r = await API.call('login', {username:u, password:p});
-        if(r.ok){
-          SESSION.set({ token:r.token, profile:r.profile, expiresAt:r.expiresAt });
-          buildMenu(); routeTo('#/');
-          U.toast('Login berhasil.','success');
-        }else{
-          U.toast(r.error||'Login gagal.','danger');
+  // Isi cepat
+  U.qs('#btn-fill').onclick = ()=>{
+    U.qs('#login-username').value='admin';
+    U.qs('#login-password').value='user123';
+  };
+
+  // Util: refresh tampilan badge client di login (dipanggil setelah modal ditutup)
+  function refreshLoginClientBadge(){
+    const v = (localStorage.getItem('client.env') || '').toUpperCase();
+    const el = U.qs('#login-client-badge');
+    if(!el) return;
+    el.querySelector('b').textContent = v || '-';
+    el.classList.remove('text-bg-info','text-bg-secondary');
+    el.classList.add(v ? 'text-bg-info' : 'text-bg-secondary');
+  }
+
+  // Pindah client dari layar login
+  const btnSwitch = U.qs('#btn-switch-client');
+  if (btnSwitch){
+    btnSwitch.onclick = ()=>{
+      if (typeof window.__openClientModal === 'function') {
+        __openClientModal();
+
+        // Setelah modal pemilihan client ditutup, update badge
+        const m = document.getElementById('clientModal');
+        if (m && window.bootstrap?.Modal){
+          // bootstrap event
+          m.addEventListener('hidden.bs.modal', refreshLoginClientBadge, { once:true });
+        } else if (m) {
+          // fallback: polling singkat
+          setTimeout(refreshLoginClientBadge, 300);
         }
-      }catch(e){ U.toast(e.message,'danger'); }
-      finally{ U.safe.add(spin, 'd-none'); }
+      } else {
+        // fallback: toggle cepat (jika modal tidak tersedia)
+        const curr = (localStorage.getItem('client.env') || '').toUpperCase();
+        const target = (curr === 'TRAINING') ? 'PRODUCTION' : 'TRAINING';
+        if (confirm(`Ganti Client ke ${target}?`)) {
+          if (window.Client && Client.switchTo) { Client.switchTo(target); }
+          else {
+            localStorage.setItem('client.env', target);
+            refreshLoginClientBadge();
+          }
+        }
+      }
     };
   }
+
+  // Login action
+  U.qs('#btn-login').onclick = async ()=>{
+    const u = U.qs('#login-username').value.trim();
+    const p = U.qs('#login-password').value;
+    const spin = U.qs('#login-spin'); U.safe.remove(spin, 'd-none');
+    try{
+      const r = await API.call('login', {username:u, password:p});
+      if(r.ok){
+        SESSION.set({ token:r.token, profile:r.profile, expiresAt:r.expiresAt });
+        buildMenu(); routeTo('#/');
+        U.toast('Login berhasil.','success');
+      }else{
+        U.toast(r.error||'Login gagal.','danger');
+      }
+    }catch(e){ U.toast(e.message,'danger'); }
+    finally{ U.safe.add(spin, 'd-none'); }
+  };
+}
+
+
 
   // === MENU & ROUTING BARU (group + submenu) ===
   function buildMenu(){
@@ -597,23 +662,42 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
     btnLogout.onclick = async ()=>{
-    const ok = confirm('Anda yakin ingin keluar dari aplikasi?\nSemua data lokal di perangkat ini akan dihapus agar aman.');
-    if(!ok) return;
+  // 1) Konfirmasi logout
+  const ok = confirm('Anda yakin ingin keluar dari aplikasi?\nData lokal akan dibersihkan untuk keamanan.');
+  if(!ok) return;
 
-    let opened = false;
-    try{
-      await appHardResetAll();  // reset total + SESSION.clear()
-      try{ buildMenu(); }catch(_){}
-      routeTo('#/login');
-      U.toast && U.toast('Anda telah logout. Data lokal dibersihkan.', 'warning');
-    }catch(e){
-      U.toast && U.toast('Gagal membersihkan sebagian data: ' + (e.message||e), 'danger');
-      // tetap arahkan ke login agar sesi berakhir
-      routeTo('#/login');
-    }finally{
-      setTimeout(()=>{}, 150);
+  // 2) Tawarkan opsi ganti client juga
+  const alsoSwitch = confirm(
+    'Apakah Anda juga ingin mengganti Client?\n\n' +
+    'Pilih "OK" untuk reset pilihan Client (akan diminta pilih ulang saat masuk).\n' +
+    'Pilih "Cancel" untuk tetap di Client yang sama.'
+  );
+
+  // Backup env jika user memilih TIDAK ganti client
+  let keepEnv = null;
+  if(!alsoSwitch){
+    try{ keepEnv = localStorage.getItem('client.env'); }catch(_){}
+  }
+
+  try{
+    await appHardResetAll();  // reset total (localStorage.clear(), SW, caches, IndexedDB)
+
+    // Pulihkan env bila user ingin tetap pada client yang sama
+    if(!alsoSwitch && keepEnv){
+      localStorage.setItem('client.env', keepEnv);
     }
-  };
+
+    // Arahkan ke login — jika env hilang, modal pilih client akan muncul
+    buildMenu(); routeTo('#/login');
+    U.toast && U.toast('Anda telah logout.', 'warning');
+  }catch(e){
+    U.toast && U.toast('Terjadi kendala saat logout: ' + (e.message||e), 'danger');
+    routeTo('#/login');
+  }finally{
+    setTimeout(()=>{}, 120);
+  }
+};
+
 
 
   // Theme toggle

@@ -10,11 +10,52 @@ const M = {
   ydivisi: STORE.getMaster('ydivisi') || [],
   yrayon:  STORE.getMaster('yrayon')  || [],
   yestate: STORE.getMaster('yestate') || [],
+  yplant:  STORE.getMaster('yplant')  || [],
 };
 
 const lc = v => (v==null ? '' : String(v).trim().toLowerCase());
 function estateById(id){ return (M.yestate||[]).find(e=> String(e.id)===String(id)) || {}; }
 function rayonById(id){  return (M.yrayon||[]).find(e=> String(e.id)===String(id))  || {}; }
+
+function _plantNameByEstateIdSync(estate_id){
+  try{
+    const est = (M.yestate||[]).find(e => String(e.id) === String(estate_id)) || {};
+    // ambil plant_id dari estate
+    let pid = est.plant_id || est.id_plant || est.kd_plant || est.kode_plant;
+    // jika plant_id tak ada, coba baca nama PT langsung dari estate (beberapa DB taruh di sini)
+    if(!pid){
+      const byName = (
+        est.plant_nama || est.nama_company || est.plant_name ||
+        est.company || est.perusahaan || ''
+      );
+      if(String(byName).trim()) return String(byName).trim();
+    }
+    // resolve ke master plant
+    const p = (M.yplant||[]).find(x =>
+      String(x.id)===String(pid) || String(x.plant_id)===String(pid) ||
+      String(x.kode)===String(pid) || String(x.kd_plant)===String(pid)
+    );
+    if(p){
+      return String(p.nama_panjang || p.nama || p.plant_nama || p.company || p.plant || '').trim();
+    }
+    // fallback: jika hanya ada 1 plant di master, pakai itu
+    if((M.yplant||[]).length === 1){
+      const only = M.yplant[0];
+      return String(only.nama_panjang || only.nama || only.company || '').trim();
+    }
+  }catch(_){/* ignore */}
+  // hard fallback terakhir (sesuai sebelumnya)
+  return 'KARYAMAS PLANTATION';
+}
+
+function _formatCompanyLabel(name){
+  const raw = String(name||'').trim();
+  if(!raw) return 'PT. BUANA TUNAS SEJAHTERA';
+  const upper = raw.toUpperCase();
+  // jika sudah mulai dengan "PT" atau "P.T" atau "PT.", biarkan tanpa menambah "PT."
+  if(/^P\.?T\.?\s/.test(upper)){ return upper; }
+  return `PT. ${upper}`;
+}
 
 function _normLoose(s){
   // lowercase → buang non huruf/angka → hilangkan substring "div"
@@ -114,8 +155,12 @@ function signerFromMasters({ estate_id, rayon_id, divisi_id }){
   const ray = rayonById(rayon_id);
   const div = resolveDivisi(divisi_id);
   const pick=(row,...keys)=>{ for(const k of keys){ if(row && row[k]!=null && String(row[k]).trim()!=='') return String(row[k]); } return ''; };
+
+  // <<— [CHANGED] company dari plant master berdasarkan estate_id
+  const companyName = _plantNameByEstateIdSync(estate_id);
+
   return {
-    company:   pick(est,'plant_nama','company_name','nama_company','plant_name','plant') || 'BUANA TUNAS SEJAHTERA',
+    company:   companyName || 'KARYAMAS PLANTATION',
     estateFull:pick(est,'nama_panjang','nama','estate_nama','nama_estate'),
     manager:   pick(est,'manager','manager_nama','nama_mgr'),
     ktu:       pick(est,'ktu','ktu_nama','nama_ktu'),
@@ -542,7 +587,7 @@ function buildDetailHtml(one){
   const signer = signerFromMasters({
     estate_id: h.estate_id, rayon_id: h.rayon_id, divisi_id: h.divisi_id
   });
-  const company = (signer.company ? `PT. ${String(signer.company).toUpperCase()}` : 'PT. BUANA TUNAS SEJAHTERA');
+  const company = _formatCompanyLabel(signer.company);
   const estateFull = signer.estateFull || estateById(h.estate_id).nama_panjang || estateById(h.estate_id).nama || '';
 
   const HK  = it.filter(x=> String(x.tipe_item)==='HK');

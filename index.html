@@ -4,11 +4,221 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RKB App - Karyamas Plantation</title>
+
+  <!-- PWA & Styles -->
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/png" href="icons/icon-192x192.png" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"/>
   <link rel="stylesheet" href="css/style.css" />
+
+  <style>
+    /* Badge Client di navbar */
+    .client-badge { cursor: pointer; }
+    /* Modal pilihan client: gaya ringan */
+    .client-card { border:1px solid #dee2e6; border-radius:.75rem; padding:1rem; transition:transform .08s ease; }
+    .client-card:hover { transform:translateY(-2px); }
+    .client-card .title { font-weight:700; }
+    .client-card .desc  { color:#6c757d; font-size:.95rem; }
+  </style>
+
+  <!-- Bootstrap Bundle (dibutuhkan untuk modal awal) -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" defer></script>
+
+  <!-- XLSX & jsPDF (boleh didefer, skrip app akan diinject setelah pilih client) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+  <script>
+    // Expose jsPDF global saat file jsPDF sudah termuat
+    window.addEventListener('load', () => {
+      if (window.jspdf && window.jspdf.jsPDF) window.jsPDF = window.jspdf.jsPDF;
+    });
+  </script>
+
+  <!-- =========================
+       BOOTSTRAP LOADER (Client Gate)
+       =========================
+       - Tugas:
+         1) Minta user pilih Client (Production / Training) sebelum login.
+         2) Set window.GAS_URL berdasarkan pilihan.
+         3) Inject semua skrip aplikasi SETELAH pilihan dibuat.
+       - Kontrak:
+         * Tidak mengubah file JS lain.
+         * Default GAS_URL saat ini = Training.
+  -->
+  <script>
+    (function(){
+      // --- 1) Konfigurasi URL per Client
+      const GAS_URLS = {
+        PRODUCTION: "https://script.google.com/macros/s/AKfycbyxkC0in4x43_CkNkKYdRxjXfUBReJzG6W4HWJEGvIv7ObBksOhLSqbAaPkLJHEnp2sgQ/exec", // GAS URL
+        TRAINING  : "https://script.google.com/macros/s/AKfycbxLPqqds1uphvG8eIBgtgtHNZpcHU7swLiUIuXA6J1mhwBcAm4BQIL7KHH3uGv9IUgyNQ/exec"
+      };
+      const ENV_KEY = "client.env"; // localStorage key: 'PRODUCTION' | 'TRAINING'
+
+       // === Helper global untuk kelola Client ===
+    window.Client = {
+      key: ENV_KEY,
+      get(){ return (localStorage.getItem(ENV_KEY) || 'TRAINING').toUpperCase(); },
+      set(env){ localStorage.setItem(ENV_KEY, String(env||'TRAINING').toUpperCase()); },
+      clear(){ localStorage.removeItem(ENV_KEY); },
+      urlOf(env){ return GAS_URLS[String(env||'TRAINING').toUpperCase()] || GAS_URLS.TRAINING; },
+      // Ganti client saat app sudah berjalan:
+      // - set env baru
+      // - bersihkan cache aplikasi (kecuali client.env)
+      // - paksa reload agar app bootstrap ulang dengan GAS_URL baru
+      async switchTo(env){
+        try{
+          this.set(env);
+          // Bersih-bersih minimal: hapus semua kecuali client.env
+          const keep = this.key;
+          const allKeys = Object.keys(localStorage);
+          for(const k of allKeys){
+            if(k !== keep) localStorage.removeItem(k);
+          }
+          // Unregister SW agar cache tak "nyangkut"
+          if ('serviceWorker' in navigator){
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map(r=>r.unregister()));
+          }
+        }catch(_){}
+        // Reload halamannya
+        location.replace(location.pathname + location.search + '#/login');
+      }
+    };
+
+      // --- 2) Daftar skrip aplikasi (akan diinject berurutan)
+      const APP_SCRIPTS = [
+        "js/utils.js",
+        "js/auth.js",
+        "js/app.js",
+        "js/storage.js",
+
+        // Pages
+        "js/pages/inbox.js",
+        "js/pages/ktu.js",
+
+        // Master pages
+        "js/pages/master/settings.master.js",
+        "js/pages/master/settings.upload.js",
+        "js/pages/master/settings.reset.js",
+        "js/pages/master/settings.maintenance.js",
+
+        // RKB
+        "js/pages/rkb/rkb_form.js",
+        "js/pages/rkb/rkb_list.js",
+        "js/pages/rkb/rkb_approvals_askep.js",
+        "js/pages/rkb/rkb_approvals_manager.js",
+
+        // PDO
+        "js/pages/pdo/exporter_pdo.js",
+        "js/pages/pdo/pdo_form.js",
+        "js/pages/pdo/pdo_list.js",
+        "js/pages/pdo/pdo_approvals_askep.js",
+        "js/pages/pdo/pdo_approvals_manager.js",
+        "js/pages/pdo/ktu_rekap_pdo.js",
+
+        // RKH
+        "js/pages/rkh/rkh_form.js",
+        "js/pages/rkh/rkh_list.js"
+      ];
+
+      // --- 3) Helper: inject <script> berantai agar urutan terjaga
+      function loadScriptsSequentially(list, done){
+        const head = document.head || document.getElementsByTagName('head')[0];
+        let i = 0;
+        (function next(){
+          if(i >= list.length){ done && done(); return; }
+          const s = document.createElement('script');
+          s.src = list[i++];
+          s.onload = next;
+          s.onerror = next; // lanjut walau ada yang gagal, agar tidak deadlock
+          head.appendChild(s);
+        })();
+      }
+
+      // --- 4) Pasang GAS_URL global dan muat skrip app
+      function bootWithEnv(env){
+      const key = (env || "").toUpperCase();
+      const url = GAS_URLS[key] || GAS_URLS.TRAINING;
+      window.GAS_URL = url;
+
+      document.addEventListener('DOMContentLoaded', ()=>{
+        const badge = document.getElementById('client-badge');
+        if(badge){ badge.textContent = (key || 'TRAINING'); badge.classList.remove('d-none'); }
+      });
+
+      // Inject semua skrip aplikasi
+      loadScriptsSequentially(APP_SCRIPTS, () => {
+        // Register SW setelah app siap
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('sw.js');
+        }
+
+        // === TRIGGER INIT APP ===
+        // app.js menunggu DOMContentLoaded; karena sekarang sudah terlewat,
+        // kita kirim event sintetis supaya init() di app.js langsung jalan.
+        if (document.readyState !== 'loading') {
+          try { window.dispatchEvent(new Event('DOMContentLoaded')); } catch(_) {}
+        } else {
+          // fallback extremely-rare
+          document.addEventListener('DOMContentLoaded', () => {
+            try { window.dispatchEvent(new Event('DOMContentLoaded')); } catch(_) {}
+          }, { once:true });
+        }
+      });
+    }
+
+      // --- 5) Event handler pilihan Client
+      window.__chooseClient = function(env){
+        try{
+          const normalized = (env || 'TRAINING').toUpperCase();
+          localStorage.setItem(ENV_KEY, normalized);
+          bootWithEnv(normalized);
+        }catch(e){
+          console.warn('Gagal set client env:', e);
+          bootWithEnv('TRAINING');
+        }finally{
+          // Tutup modal kalau tampil
+          const el = document.getElementById('clientModal');
+          if (el && window.bootstrap?.Modal){
+            const inst = window.bootstrap.Modal.getOrCreateInstance(el);
+            inst.hide();
+          } else if(el){
+            el.classList.remove('show'); el.style.display='none';
+          }
+        }
+      };
+
+      // --- 6) Inisialisasi: jika sudah ada pilihan => langsung boot; jika belum => tampilkan modal
+      document.addEventListener('DOMContentLoaded', () => {
+        const env = localStorage.getItem(ENV_KEY);
+        if(env){
+          bootWithEnv(env);
+        }else{
+          // Tampilkan modal pemilihan client
+          const el = document.getElementById('clientModal');
+          if (el && window.bootstrap?.Modal){
+            window.bootstrap.Modal.getOrCreateInstance(el, {backdrop:'static', keyboard:false}).show();
+          }else if(el){
+            // fallback minimal
+            el.classList.add('show'); el.style.display='block';
+          }
+        }
+      });
+
+      // --- 7) API kecil untuk ganti Client via badge (opsional)
+      window.__openClientModal = function(){
+        const el = document.getElementById('clientModal');
+        if (el && window.bootstrap?.Modal){
+          window.bootstrap.Modal.getOrCreateInstance(el, {backdrop:'static', keyboard:false}).show();
+        }else if(el){
+          el.classList.add('show'); el.style.display='block';
+        }
+      };
+
+    })();
+  </script>
 </head>
+
 <body class="light">
   <!-- Top Navbar -->
   <nav id="navbar" class="navbar navbar-expand-lg fixed-top border-bottom bg-body-tertiary">
@@ -23,6 +233,8 @@
         </ul>
         <div class="d-flex align-items-center gap-3">
           <span id="online-status" class="badge text-bg-secondary">offline</span>
+          <!-- Badge Client, klik untuk mengganti -->
+          <span class="badge text-bg-info client-badge d-none" id="client-badge" onclick="__openClientModal()">TRAINING</span>
           <span id="active-user" class="text-muted small">-</span>
           <button id="btn-logout" class="btn btn-sm btn-outline-danger d-none">Logout</button>
           <button id="btn-theme" class="btn btn-sm btn-outline-secondary" title="Light/Dark">🌓</button>
@@ -61,51 +273,54 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script>window.jsPDF = window.jspdf.jsPDF;</script>
-  <script>window.GAS_URL = "https://script.google.com/macros/s/AKfycbxLPqqds1uphvG8eIBgtgtHNZpcHU7swLiUIuXA6J1mhwBcAm4BQIL7KHH3uGv9IUgyNQ/exec";</script>
-  <script src="js/utils.js"></script>
-  <script src="js/auth.js"></script>
-  <script src="js/app.js"></script>
-  <script src="js/storage.js"></script>
+  <!-- =========================
+       Modal: Pilih Client (Production / Training)
+       ========================= -->
+  <div class="modal fade" id="clientModal" tabindex="-1" aria-labelledby="clientModalLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 id="clientModalLabel" class="modal-title">Pilih Client</h5>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted mb-3">
+            Tentukan Client terlebih dahulu. Anda selalu bisa mengganti pilihan melalui badge <b>Client</b> di kanan atas.
+          </p>
+          <div class="row g-3">
+            <div class="col-12">
+              <div class="client-card">
+                <div class="d-flex align-items-start justify-content-between">
+                  <div>
+                    <div class="title">Production</div>
+                    <div class="desc">Gunakan database produksi (live).</div>
+                  </div>
+                  <button class="btn btn-primary" onclick="__chooseClient('PRODUCTION')">Pilih</button>
+                </div>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="client-card">
+                <div class="d-flex align-items-start justify-content-between">
+                  <div>
+                    <div class="title">Training</div>
+                    <div class="desc">Gunakan database pelatihan (Default)</div>
+                  </div>
+                  <button class="btn btn-outline-primary" onclick="__chooseClient('TRAINING')">Pilih</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <hr class="my-3">
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="small text-muted">Tidak yakin? Pilih <b>Training</b> lebih dahulu.</span>
+            <button class="btn btn-sm btn-secondary" onclick="__chooseClient('TRAINING')">Lanjutkan (Training)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-  <!-- Pages -->
-  <script src="js/pages/inbox.js"></script>
-  <script src="js/pages/ktu.js"></script>
-
-  <!-- master pages -->
-  <script src="js/pages/master/settings.master.js"></script>
-  <script src="js/pages/master/settings.upload.js"></script>
-  <script src="js/pages/master/settings.reset.js"></script>
-  <script src="js/pages/master/settings.maintenance.js"></script>
-
-  <!-- RKB -->
-  <script src="js/pages/rkb/rkb_form.js"></script>
-  <script src="js/pages/rkb/rkb_list.js"></script>
-  <script src="js/pages/rkb/rkb_approvals_askep.js"></script>
-  <script src="js/pages/rkb/rkb_approvals_manager.js"></script>
-
-  <!-- PDO -->
-  <script src="js/pages/pdo/exporter_pdo.js"></script>
-  <script src="js/pages/pdo/pdo_form.js"></script>
-  <script src="js/pages/pdo/pdo_list.js"></script>
-  <script src="js/pages/pdo/pdo_approvals_askep.js"></script>
-  <script src="js/pages/pdo/pdo_approvals_manager.js"></script>
-  <script src="js/pages/pdo/ktu_rekap_pdo.js"></script>
-
-    <!-- RKH -->
-  <script src="js/pages/rkh/rkh_form.js"></script>
-  <script src="js/pages/rkh/rkh_list.js"></script>
-
-  <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('sw.js');
-      });
-    }
-  </script>
+  <!-- Service Worker dipindah ke loader (setelah scripts diinject) -->
 
 </body>
 </html>

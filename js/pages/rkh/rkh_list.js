@@ -330,7 +330,9 @@ Pages.rkhList = function(which='draft'){
     } else {
       const drafts  = readDraftSummaries();
       const history = await readHistoryFromActuals();
-      data = mergeUniqueByNomor(drafts, history);
+      const bufferSummary = readFormBufferSummary(); // bisa null
+      // Prioritaskan server (history) -> draft -> buffer
+      data = mergeUniqueByNomor(history, drafts, bufferSummary);
     }
 
     // 2) Baru resolve nama perusahaan (bisa memakai sample dari data)
@@ -1000,38 +1002,99 @@ async function openViewModal(raw){
   function meUser(){ return (SESSION.profile()?.username || '').toLowerCase(); }
 
   async function readHistoryFromActuals(){
-    try{
-      await resolveRkhActualNames();
-    }catch(_){}
-    const all = STORE.getActual?.(RKH_ACT_KEYS.header) || [];
-    const mine = all.filter(x => String(x.username||'').toLowerCase() === meUser());
-    return mine.map(x => ({
-      nomor       : x.nomor || '',
-      ref_rkb     : x.ref_rkb || '',
-      tanggal     : x.tanggal || x.created_at || '',
-      periode     : fPeriode(x.periode || ''),
-      divisi      : x.divisi || x.divisi_id || '',
-      divisi_id   : x.divisi_id || '',
-      estate_full : x.estate_full || '',
-      estate_id   : x.estate_id || '',
-      rayon_id    : x.rayon_id || '',
-      status      : x.status || 'created',
-      hk_total    : +x.hk_total || 0,
-      created_at  : x.created_at || '',
-      updated_at  : x.updated_at || '',
-      last_error  : '',
-      items       : [],
-      bahan       : [],
-      __serverLinked: true,
-      __history   : true,
-      _raw        : { header: x, items: [], bahan: [] }
-    }));
-  }
+  try{
+    await resolveRkhActualNames();
+  }catch(_){}
+  const all = STORE.getActual?.(RKH_ACT_KEYS.header) || [];
+  // NOTE: sebelumnya anda memfilter berdasarkan username; sekarang ambil semua server actuals
+  return (all||[]).map(x => ({
+    nomor       : x.nomor || '',
+    ref_rkb     : x.ref_rkb || '',
+    tanggal     : x.tanggal || x.created_at || '',
+    periode     : fPeriode(x.periode || ''),
+    divisi      : x.divisi || x.divisi_id || '',
+    divisi_id   : x.divisi_id || '',
+    estate_full : x.estate_full || '',
+    estate_id   : x.estate_id || '',
+    rayon_id    : x.rayon_id || '',
+    status      : x.status || 'created',
+    hk_total    : +x.hk_total || 0,
+    created_at  : x.created_at || '',
+    updated_at  : x.updated_at || '',
+    last_error  : '',
+    items       : [],    // detail diambil on-demand via detailFromActuals
+    bahan       : [],
+    __serverLinked: true,
+    __history   : true,
+    _raw        : { header: x, items: [], bahan: [] }
+  }));
+}
 
-  function mergeUniqueByNomor(primaryArr, secondaryArr){
-    const used = new Set((primaryArr||[]).map(r => String(r.nomor)));
-    const extra = (secondaryArr||[]).filter(r => !used.has(String(r.nomor)));
-    return (primaryArr||[]).concat(extra);
+function readFormBufferSummary(){
+  try{
+    const buf = U.S.get('rkh.form.buffer') || U.S.get('rkh.form.buffer', null) || null;
+    if(!buf) return null;
+    // Buf mungkin datang sebagai object form; normalisasi ringkas
+    const h = {
+      nomor: String(buf.nomor || buf.header?.nomor || buf.nomor || '').trim(),
+      ref_rkb: String(buf.ref_rkb || buf.header?.ref_rkb || '').trim(),
+      tanggal: String(buf.tanggal || buf.header?.tanggal || ''),
+      periode: fPeriode(buf.periode || buf.header?.periode || ''),
+      divisi: String(buf.divisi || buf.divisi_id || buf.header?.divisi || buf.header?.divisi_id || ''),
+      divisi_id: String(buf.divisi_id || buf.header?.divisi_id || ''),
+      estate_full: String(buf.estate_full || buf.header?.estate_full || ''),
+      estate_id: String(buf.estate_id || buf.header?.estate_id || ''),
+      rayon_id: String(buf.rayon_id || buf.header?.rayon_id || ''),
+      status: String(buf.status || buf.header?.status || 'draft'),
+      hk_total: Number(buf.hk_total || 0),
+      created_at: buf.created_at || (buf.header && buf.header.created_at) || '',
+      updated_at: buf.updated_at || (buf.header && buf.header.updated_at) || '',
+      last_error: '',
+      items: buf.items || [],
+      bahan: buf.bahan || [],
+      __serverLinked: !!(buf.__serverLinked || (buf.header && buf.header.__serverLinked)),
+      __history: false,
+      _raw: buf
+    };
+    // If nomor empty, still return but as null to skip insertion
+    if(!h.nomor) return null;
+    return h;
+  }catch(_){ return null; }
+}
+
+  function mergeUniqueByNomor(primaryArr, secondaryArr, bufferRow){
+    // primaryArr: server (diprioritaskan), secondaryArr: drafts
+    const out = [];
+    const used = new Set();
+
+    (primaryArr||[]).forEach(r=>{
+      const no = String(r.nomor||'').trim();
+      used.add(no);
+      out.push(r);
+    });
+
+    (secondaryArr||[]).forEach(r=>{
+      const no = String(r.nomor||'').trim();
+      if(!used.has(no)){
+        used.add(no);
+        out.push(r);
+      }else{
+        // jika nomor sama tapi secondary punya __serverLinked true (unlikely), ignore — server wins
+        // jika secondary punya data detail lebih lengkap and server row lacks items, you can optionally merge details:
+        // simple merge: keep server row as is (server-first policy)
+      }
+    });
+
+    // terakhir, tambahkan buffer jika ada dan belum ada
+    if(bufferRow && bufferRow.nomor){
+      const bno = String(bufferRow.nomor||'').trim();
+      if(bno && !used.has(bno)){
+        out.push(bufferRow);
+        used.add(bno);
+      }
+    }
+
+    return out;
   }
 
   async function detailFromActuals(nomor){
