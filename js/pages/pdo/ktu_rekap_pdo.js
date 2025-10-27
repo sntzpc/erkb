@@ -39,6 +39,61 @@ Pages.ktuRekapPDO = async function(){
     yestate: STORE.getMaster('yestate') || []
   };
 
+  // === Ambil scope estate user dari profile ===
+function getUserEstateScope(){
+  const prof = SESSION.profile() || {};
+  const rawRole = String(prof.role||'').trim().toLowerCase();
+
+  // Kumpulan id estate yang diizinkan
+  const allow = new Set();
+
+  // 1) Sumber langsung yang umum dipakai backend
+  //    - estate_id: string tunggal
+  //    - estate_ids / estates: array id
+  const directOne  = prof.estate_id || prof.estate || prof.est || '';
+  const directMany = prof.estate_ids || prof.estates || [];
+
+  if (directOne) allow.add(String(directOne));
+  if (Array.isArray(directMany)) directMany.forEach(x => x && allow.add(String(x)));
+
+  // 2) Beberapa profil menyimpan daftar DIVISI user → turunkan estate_id via master
+  const divs = prof.divisi_ids || prof.divisis || prof.divisions || [];
+  if (Array.isArray(divs) && divs.length){
+    divs.forEach(did=>{
+      const hit = (M.ydivisi||[]).find(dd => String(dd.id)===String(did));
+      if (hit && hit.estate_id) allow.add(String(hit.estate_id));
+    });
+  }
+
+  // 3) Ada juga yang hanya menyimpan "estate_nama" → mapping ke id
+  if (prof.estate_nama){
+    const hit = (M.yestate||[]).find(e=>{
+      const a = String(e.nama_panjang||'').trim().toLowerCase();
+      const b = String(e.nama||'').trim().toLowerCase();
+      const t = String(prof.estate_nama||'').trim().toLowerCase();
+      return t===a || t===b;
+    });
+    if (hit) allow.add(String(hit.id));
+  }
+
+  // Catatan: untuk role non-KTU biarkan kosong (artinya bebas, pakai filter UI).
+  // Untuk KTU, bila kosong, kita tidak paksa (fallback ke UI).
+  return { role: rawRole, estateIds: Array.from(allow) };
+}
+
+// === [BARU] Terapkan scope estate user ke headers (khusus KTU)
+function applyUserEstateScope(rows){
+  const { role, estateIds } = getUserEstateScope();
+  if (role !== 'ktu') return rows;        // hanya KTU yang di-hard-scope
+  if (!estateIds.length) return rows;     // tak ada info scope → biarkan
+
+  const allowed = new Set(estateIds.map(String));
+  return (rows||[]).filter(r=>{
+    // r.estate_id sudah dinormalisasi di normalizeHeaders()
+    return r.estate_id && allowed.has(String(r.estate_id));
+  });
+}
+
   // -------------------------------------------------------------
   // 3) UTIL (formatting & helpers)
   // -------------------------------------------------------------
@@ -84,18 +139,47 @@ Pages.ktuRekapPDO = async function(){
   }
 
 
-  // === [DROP-IN PATCH] Normalisasi header agar divisi selalu terisi konsisten ===
+  // === Normalisasi header divisi ===
 function normalizeHeaders(arr){
+  // helper: cari estate by "nama panjang"/"nama"
+  const findEstateIdByName = (namaLike)=>{
+    const n = String(namaLike||'').trim().toLowerCase();
+    if(!n) return '';
+    const hit = (M.yestate||[]).find(e=>{
+      const a = String(e.nama_panjang||'').trim().toLowerCase();
+      const b = String(e.nama||'').trim().toLowerCase();
+      return n===a || n===b;
+    });
+    return hit ? String(hit.id) : '';
+  };
+  // helper: turunkan estate dari divisi (bila master ydivisi punya estate_id)
+  const findEstateIdByDivisi = (divAny)=>{
+    const v = String(divAny||'').trim().toLowerCase();
+    if(!v) return '';
+    const hit = (M.ydivisi||[]).find(d=>{
+      const id   = String(d.id||'').trim().toLowerCase();
+      const kode = String(d.kode||d.kd_divisi||'').trim().toLowerCase();
+      const nama = String(d.nama||'').trim().toLowerCase();
+      return v===id || v===kode || v===nama;
+    });
+    return hit && hit.estate_id ? String(hit.estate_id) : '';
+  };
+
   return (arr||[]).map(r=>{
-    // Ambil kunci divisi dari beberapa kemungkinan kolom
     const divKeyRaw = r.divisi_id || r.divisi || r.div || '';
+    // estate_id prioritas: langsung dari server → dari divisi → dari nama estate
+    const estate_id =
+      (r.estate_id ? String(r.estate_id) : '') ||
+      findEstateIdByDivisi(divKeyRaw) ||
+      findEstateIdByName(r.estate_nama);
+
     return {
       nomor       : r.nomor,
       periode     : fmt.periodeYM(r.periode),
-      // Simpan apa adanya (bisa id/kode/nama) → akan ditangani oleh filter & label
-      divisi_id   : divKeyRaw,
+      divisi_id   : divKeyRaw,                // biarkan fleksibel (id/kode/nama)
       rayon_kode  : r.rayon_kode || '',
       estate_nama : r.estate_nama || '',
+      estate_id   : estate_id || '',          // <-- kini tersedia & konsisten
       total_rp    : Number(r.total_rp||0),
       status      : normalizeStatus(r.status || r.raw_status || r.state)
     };
@@ -232,31 +316,48 @@ function passDivisi(row){
   // -------------------------------------------------------------
   // 6) LOADERS
   // -------------------------------------------------------------
-  async function loadHeaders(preferLocal=true){
-    let openedHere = false;
-    try{
-      let data = [];
-      if (preferLocal) {
-        const cached = getHeaderCache();
-        if (Array.isArray(cached) && cached.length) data = cached;
+    async function loadHeaders(preferLocal=true){
+      let openedHere = false;
+      try{
+        let data = [];
+        if (preferLocal) {
+          const cached = getHeaderCache();
+          if (Array.isArray(cached) && cached.length) data = cached;
+        }
+        if (!data.length) {
+          const pm = document.getElementById('progressModal');
+          const pmShown = pm && pm.classList.contains('show');
+          if(!pmShown){ U.progressOpen('Menyiapkan rekap PDO...'); U.progress(30,'Ambil data (server)'); openedHere = true; }
+          const r = await API.call('ktuRekapPDO', {}); // server: semua estate
+          if(!r.ok) throw new Error(r.error||'Gagal ambil data');
+          data = r.rows || [];
+          setHeaderCache(data);
+        }
+
+        // 1) Normalisasi struktur baris
+        let norm = normalizeHeaders(data);
+
+        // 2) Terapkan SCOPE estate user (khusus KTU)
+        norm = applyUserEstateScope(norm);
+
+        // 3) Set ke memori modul
+        headers = norm;
+
+        // 4) Set default filter Estate = estate user pertama (jika kosong)
+        if (!filters.estate_id){
+          const { role, estateIds } = getUserEstateScope();
+          if (role==='ktu' && estateIds && estateIds.length){
+            filters.estate_id = String(estateIds[0]);
+          }
+        }
+
+        render(); // build UI + drawTable()
+      }catch(e){
+        root.innerHTML = `<div class="alert alert-danger">Gagal memuat rekap PDO: ${e.message||e}</div>`;
+      }finally{
+        if(openedHere){ U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350); }
       }
-      if (!data.length) {
-        const pm = document.getElementById('progressModal');
-        const pmShown = pm && pm.classList.contains('show');
-        if(!pmShown){ U.progressOpen('Menyiapkan rekap PDO...'); U.progress(30,'Ambil data (server)'); openedHere = true; }
-        const r = await API.call('ktuRekapPDO', {}); // server must return minimal header rows
-        if(!r.ok) throw new Error(r.error||'Gagal ambil data');
-        data = r.rows || [];
-        setHeaderCache(data);
-      }
-      headers = normalizeHeaders(data);
-      render(); // initial render (build UI)
-    }catch(e){
-      root.innerHTML = `<div class="alert alert-danger">Gagal memuat rekap PDO: ${e.message||e}</div>`;
-    }finally{
-      if(openedHere){ U.progress(100,'Selesai'); setTimeout(()=>U.progressClose(), 350); }
     }
-  }
 
   // Ambil detail untuk daftar nomor (cache-first, server fallback per nomor)
   async function fetchDetailsForPrint(list){
@@ -309,11 +410,19 @@ function passDivisi(row){
   // -------------------------------------------------------------
   function passEstate(row){
     if(!filters.estate_id) return true;
+
+    // Prioritas pakai estate_id (hasil normalisasi header)
+    if (row.estate_id) {
+      return String(row.estate_id) === String(filters.estate_id);
+    }
+
+    // Fallback lama: cocokkan berdasarkan nama estate
     const est = (M.yestate||[]).find(e=> String(e.id)===String(filters.estate_id));
     if(!est) return true;
     const target = lc(est.nama_panjang || est.nama || '');
     return lc(row.estate_nama) === target;
   }
+
   function passRayon(row){
     if(!filters.rayon_id) return true;
     const r = (M.yrayon||[]).find(e=> String(e.id)===String(filters.rayon_id));

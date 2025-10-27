@@ -14,13 +14,17 @@ Pages.ktu = async function () {
   }
 
   // ====== 1) UTILITIES ======
-  const ACT_KEY_KTU = 'kpl.actual.ktu_rekap';
   const WIB = { timeZone: 'Asia/Jakarta' };
   const tzNow = () => new Date();
-  function getKtuCache() { return U.S.get(ACT_KEY_KTU, []) || []; }
-  function setKtuCache(rows) { U.S.set(ACT_KEY_KTU, rows || []); }
   function _lc(v) { return v == null ? '' : String(v).trim().toLowerCase(); }
   const isNonEmpty = (v) => v != null && String(v).trim() !== '';
+
+  // === [PATCH] Key cache per-user supaya tidak ketukar antar user ===
+  const __profile = SESSION.profile?.() || {};
+  const ACT_KEY_KTU = `kpl.actual.ktu_rekap.${__profile.username || __profile.user_id || 'anon'}`;
+
+  function getKtuCache() { return U.S.get(ACT_KEY_KTU, []) || []; }
+  function setKtuCache(rows) { U.S.set(ACT_KEY_KTU, rows || []); }
 
   // Normalisasi YYYY-MM
   const fPeriode = (p) => {
@@ -51,7 +55,7 @@ Pages.ktu = async function () {
     estate_id: '',
     rayon_id: '',
     divisi_id: '',
-    status: 'FULL_APPROVED'
+    status: 'ALL'
   };
 
   // ====== 3) INDEX HELPERS ======
@@ -170,31 +174,55 @@ Pages.ktu = async function () {
   // Ambil no_material HANYA dari master ybahan berdasar nama bahan (case-insensitive)
   function resolveNoMaterialFromMaster(namaBahan, BX) {
     if (!isNonEmpty(namaBahan) || !BX) return '';
-    // 1) exact nama
-    const hitNama = BX.byNama.get(_lc(namaBahan));
+
+    const name = String(namaBahan).trim();
+
+    // 0) Normalizer nama
+    const normName = name.replace(/\s+/g,' ').trim();
+
+    // 1) Exact by NAMA (case-insensitive)
+    const hitNama = BX.byNama.get(_lc(normName));
     if (hitNama) {
       const code = findAnyCode(hitNama);
       if (code) return code;
     }
-    // 2) jika nama mengandung token kode di depan (misal "123456 - HOSE") → coba byKode
-    const lead = (String(namaBahan).trim().match(/^([A-Z0-9._-]{5,})\b/i)||[])[1];
-    if (lead) {
-      const hitKode = BX.byKode.get(_lc(lead));
-      if (hitKode) {
-        const code = findAnyCode(hitKode);
-        if (code) return code;
+
+    // 2) Tangkap KODE DI DEPAN atau DALAM KURUNG atau DI AKHIR
+    //    - depan: "12345 - HOSE ..."
+    //    - dalam kurung: "HOSE (MAT-12345)" / "(1234567)"
+    //    - akhir: "HOSE ... - 12345"
+    const tokenRegexes = [
+      /^([A-Z0-9._-]{5,})\b/i,                 // depan
+      /\(([A-Z0-9._-]{5,})\)/i,                // dalam kurung
+      /[-–—]\s*([A-Z0-9._-]{5,})\s*$/i         // akhir setelah dash
+    ];
+    for (const rgx of tokenRegexes){
+      const m = normName.match(rgx);
+      const tok = m && m[1] ? m[1] : '';
+      if (tok) {
+        const hitKode = BX.byKode.get(_lc(tok));
+        if (hitKode) { const code = findAnyCode(hitKode); if (code) return code; }
       }
     }
-    // 3) fallback ringan: cari nama master yang sama persis tanpa spasi ganda
-    const norm = _lc(String(namaBahan).replace(/\s+/g,' ').trim());
-    const byNamaKeys = BX.byNama.keys();
-    for (const k of byNamaKeys) {
-      if (k === norm) {
-        const row = BX.byNama.get(k);
-        const code = findAnyCode(row);
-        if (code) return code;
+
+    // 3) Cari master.nama yang merupakan substring signifikan dari nama input (≥ 6 chars)
+    //    contoh: master: "HOSE RUBBER 3/4" — input: "HOSE RUBBER 3/4 2M"
+    for (const [kNama, row] of BX.byNama.entries()){
+      if (kNama.length >= 6) {
+        if (_lc(normName).includes(kNama) || kNama.includes(_lc(normName))) {
+          const code = findAnyCode(row);
+          if (code) return code;
+        }
       }
     }
+
+    // 4) (LAST RESORT) pecah nama menjadi token alfanumerik panjang (≥5) dan cek ke byKode
+    const candTokens = normName.split(/[^A-Z0-9._-]+/i).filter(t => t && t.length >= 5);
+    for (const t of candTokens){
+      const hit = BX.byKode.get(_lc(t));
+      if (hit) { const code = findAnyCode(hit); if (code) return code; }
+    }
+
     return '';
   }
 
@@ -212,6 +240,50 @@ Pages.ktu = async function () {
       }
     }
     return '';
+  }
+
+  // === Ambil scope estate user dari SESSION.profile() ===
+  function getUserEstateScope(){
+    const prof = SESSION.profile() || {};
+    const role = String(prof.role||'').trim().toLowerCase();
+
+    const allow = new Set();
+
+    // estate_id tunggal atau array
+    const one  = prof.estate_id || prof.estate || '';
+    const many = prof.estate_ids || prof.estates || [];
+    if (one) allow.add(String(one));
+    if (Array.isArray(many)) many.forEach(x => x && allow.add(String(x)));
+
+    // turunkan dari divisi bila profil hanya punya daftar divisi
+    const divs = prof.divisi_ids || prof.divisis || [];
+    if (Array.isArray(divs) && divs.length){
+      divs.forEach(did=>{
+        const d = (masters.ydivisi||[]).find(x => String(x.id)===String(did));
+        if (d && d.estate_id) allow.add(String(d.estate_id));
+      });
+    }
+
+    // mapping dari estate_nama → id
+    if (prof.estate_nama){
+      const hit = (masters.yestate||[]).find(e=>{
+        const t = String(prof.estate_nama).trim().toLowerCase();
+        return t === String(e.nama_panjang||'').trim().toLowerCase() ||
+              t === String(e.nama||'').trim().toLowerCase();
+      });
+      if (hit) allow.add(String(hit.id));
+    }
+
+    return { role, estateIds: Array.from(allow) };
+  }
+
+  // === Terapkan scope estate (hanya role KTU) ===
+  function applyUserEstateScope(list){
+    const { role, estateIds } = getUserEstateScope();
+    if (role !== 'ktu') return list;
+    if (!estateIds.length) return list;
+    const allow = new Set(estateIds.map(String));
+    return (list||[]).filter(r => r.estate_id && allow.has(String(r.estate_id)));
   }
 
   // ====== 6) LOAD + NORMALIZE ======
@@ -232,7 +304,6 @@ Pages.ktu = async function () {
       const estateById = Object.fromEntries((masters.yestate || []).map(x => [String(x.id), x]));
       const divById    = Object.fromEntries((masters.ydivisi || []).map(x => [String(x.id), x]));
 
-      // sumber rekap bahan (server → cache), fallback: cache
       let raw = [];
       if (preferLocal) {
         const cached = getKtuCache();
@@ -242,7 +313,15 @@ Pages.ktu = async function () {
         const pm = document.getElementById('progressModal');
         const pmShown = pm && pm.classList.contains('show');
         if (!pmShown) { U.progressOpen('Tarik rekap bahan...'); U.progress(30, 'Ambil data (server)'); openedHere = true; }
-        const r = await API.call('ktuRekap', {});
+
+        // === [PATCH] Sertakan scope estate user ke request server ===
+        const { role, estateIds } = getUserEstateScope();
+        const params = {};
+        if (role === 'ktu' && Array.isArray(estateIds) && estateIds.length) {
+          params.estate_ids = estateIds.map(String); // server bisa abaikan kalau tidak dipakai
+        }
+
+        const r = await API.call('ktuRekap', params);
         if (!r.ok) throw new Error(r.error || 'Gagal tarik rekap');
         raw = Array.isArray(r.items) ? r.items : [];
         setKtuCache(raw);
@@ -260,8 +339,14 @@ Pages.ktu = async function () {
         const jumlah     = Number(it.jumlah || it.qty || 0);
         const satuan     = it.satuan || it.uom || '';
 
-        // *** PENTING: ambil dari master.ybahan ***
-        const no_material = resolveNoMaterialFromMaster(bahanNama, BX);
+        function firstNonEmpty(...vals) {
+          for (const v of vals) {
+            if (v != null && String(v).trim() !== '') return String(v).trim();
+          }
+          return '';
+        }
+
+        const no_material = firstNonEmpty( it.no_material, it.noMaterial ) || resolveNoMaterialFromMaster(bahanNama, BX);  // fallback terakhir
 
         const estateRow = estateById[estate_id] || {};
         const divRow    = divById[divisi_id] || {};
@@ -295,6 +380,9 @@ Pages.ktu = async function () {
         };
       });
 
+      // [SCOPE] Potong ke estate user (hanya KTU)
+      items = applyUserEstateScope(items);
+
       render();
     } catch (e) {
       root.innerHTML = `<div class="alert alert-danger">Gagal memuat: ${e.message || e}</div>`;
@@ -304,6 +392,7 @@ Pages.ktu = async function () {
       } catch (_) { /* noop */ }
     }
   }
+
 
   // ====== 7) FILTERING & AGGREGATION ======
   function getFiltered() {
@@ -338,7 +427,8 @@ Pages.ktu = async function () {
     data.forEach(r => {
       const kDiv = String(r.divisi_id || '');
       if (!map.has(kDiv)) map.set(kDiv, { divisi: nameOf(kDiv), rows: new Map(), subtotal: 0 });
-      const keyBhn = `${r.nama}|${r.satuan||''}`;
+      // sertakan no_material di key agar terbawa ke output
+      const keyBhn = `${r.no_material||''}|${r.nama||''}|${r.satuan||''}`;
       const cur = map.get(kDiv).rows.get(keyBhn) || 0;
       const add = Number(r.jumlah || 0);
       map.get(kDiv).rows.set(keyBhn, cur + add);
@@ -349,13 +439,17 @@ Pages.ktu = async function () {
         divisi: g.divisi,
         subtotal: g.subtotal,
         rows: Array.from(g.rows.entries()).map(([k, v]) => {
-          const [nama, satuan] = k.split('|');
-          return { nama, satuan, total: v };
-        }).sort((a, b) => a.nama.localeCompare(b.nama))
+          const [no_material, nama, satuan] = k.split('|');
+          return { no_material, nama, satuan, total: v };
+        }).sort((a, b) =>
+          (a.no_material||'').localeCompare(b.no_material||'') ||
+          (a.nama||'').localeCompare(b.nama||'')
+        )
       }))
       .sort((a, b) => a.divisi.localeCompare(b.divisi));
     return out;
   }
+
 
   // ====== 8) EXPORT & PRINT ======
   function exportXlsx() {
@@ -364,8 +458,8 @@ Pages.ktu = async function () {
     if (!data.length) { U.toast('Tidak ada data untuk diexport.', 'warning'); return; }
 
     const grouped = aggregateGroupedByDivisi(data);
-    const { estateTotal } = aggregateFlat(data);
 
+    // === Detail (tetap) ===
     const detail = data.map(r => ({
       Nomor: r.nomor, Periode: r.periode, Status: r.status,
       Estate: r.estate_full, Rayon: r.rayon_nama,
@@ -374,27 +468,51 @@ Pages.ktu = async function () {
       Bahan: r.nama, Jumlah: r.jumlah, Satuan: r.satuan
     }));
 
+    // === Ringkas per Divisi (sudah ada No Material) ===
     const divAOA = [];
     divAOA.push(['Divisi', 'No Material', 'Nama Bahan', 'Total', 'Satuan']);
     grouped.forEach(g => {
       divAOA.push([`=== ${g.divisi} ===`, '', '', '', '']);
       g.rows.forEach(r => {
-        divAOA.push(['', '', r.nama, r.total, r.satuan || '']);
+        divAOA.push(['', r.no_material || '', r.nama, r.total, r.satuan || '']);
       });
       divAOA.push(['Subtotal', '', '', g.subtotal, '']);
       divAOA.push(['', '', '', '', '']);
     });
 
-    const estSheet = estateTotal.map(x => ({ Bahan: x.nama, Total: x.total, Satuan: x.satuan }));
+    // === Total Estate (tambahkan No Material) ===
+    // Agregasi dengan key: no_material|nama|satuan
+    const estAgg = new Map();
+    data.forEach(r => {
+      const key = `${r.no_material || ''}|${r.nama || ''}|${r.satuan || ''}`;
+      estAgg.set(key, (estAgg.get(key) || 0) + Number(r.jumlah || 0));
+    });
 
+    const estRows = Array.from(estAgg.entries())
+      .map(([k, total]) => {
+        const [no_material, nama, satuan] = k.split('|');
+        return { no_material, nama, satuan, total };
+      })
+      .sort((a, b) =>
+        (a.no_material || '').localeCompare(b.no_material || '') ||
+        (a.nama || '').localeCompare(b.nama || '')
+      );
+
+    const estAOA = [['No Material', 'Nama Bahan', 'Total', 'Satuan']];
+    estRows.forEach(r => {
+      estAOA.push([r.no_material || '', r.nama || '', r.total, r.satuan || '']);
+    });
+
+    // === Build workbook ===
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), 'Detail');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(divAOA), 'Ringkas per Divisi');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(estSheet), 'Total Estate');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(estAOA), 'Total Estate');
 
     const labelPeriode = filters.periode || 'ALL';
     XLSX.writeFile(wb, `KTU_Rekap_${labelPeriode}.xlsx`);
   }
+
 
   function printPdfEstateThenDivisi() {
     const data = getFiltered();
@@ -659,7 +777,10 @@ ${divSections}
       </div></div>`;
 
     // events
-    U.qs('#btn-reload').onclick = () => load(false);
+    U.qs('#btn-reload').onclick = () => { 
+        U.S.set(ACT_KEY_KTU, []);   // [PATCH] kosongkan cache per-user
+        load(false);                // paksa ambil dari server
+      };
     U.qs('#btn-xlsx').onclick  = exportXlsx;
     U.qs('#btn-pdf').onclick   = () => printPdfEstateThenDivisi();
 

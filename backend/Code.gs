@@ -947,18 +947,42 @@ function managerApprove(body, sess){
 }
 /** KTU Rekap **/
 function ktuRekap(body, sess){
-  // Pastikan sheet ada
   ensureRKB(); ensureRKBItems(); ensureRKBBahan();
+  const me = getUserFromSession(sess);
 
-  // Ambil RKB yang sudah FULL APPROVE saja
-  const rkbRows = getAll(sh(SHEETS.RKB))
-    .filter(x => String(x.status||'').toLowerCase() === 'full_approved');
+  // 1) Tentukan estate scope & status filter dari FE
+  const allowEstates = new Set(estateScope_(me, body).map(String));
+  const role = String(me.role||'').toLowerCase();
+  const stFilter = normStatus_(body?.status||''); // 'all'|'full_approved'|'askep_approved'|... atau kosong
 
-  // Index cepat header RKB per nomor
+  // 2) Ambil semua header RKB lalu filter estate + (opsional) status
+  let rkbRows = getAll(sh(SHEETS.RKB));
+
+  // Estate filter:
+  if (role !== 'admin') {
+    // Non-admin: kalau allowEstates kosong ⇒ pakai estate user; jika terisi ⇒ subset estate_ids
+    if (allowEstates.size) {
+      rkbRows = rkbRows.filter(x => allowEstates.has(String(x.estate_id||'')));
+    } else {
+      rkbRows = rkbRows.filter(x => String(x.estate_id||'') === String(me.estate_id||''));
+    }
+  } else {
+    // Admin: hanya filter jika FE mengirim estate_ids
+    if (allowEstates.size) {
+      rkbRows = rkbRows.filter(x => allowEstates.has(String(x.estate_id||'')));
+    }
+  }
+
+  // Status filter (optional). Jika 'ALL' atau kosong ⇒ jangan filter.
+  if (stFilter && stFilter !== 'all') {
+    rkbRows = rkbRows.filter(x => normStatus_(x.status) === stFilter);
+  }
+
+  // 3) Index cepat header per nomor untuk join detail
   const mapR = Object.fromEntries(rkbRows.map(r => [String(r.nomor), r]));
   const nomorSet = new Set(Object.keys(mapR));
 
-  // Ambil detail bahan & items untuk pekerjaan
+  // 4) Ambil detail bahan & item (hanya nomor yang lolos)
   const itemsB = getAll(sh(SHEETS.RKB_BAHAN)).filter(b => nomorSet.has(String(b.nomor)));
   const itemsI = getAll(sh(SHEETS.RKB_ITEMS)).filter(i => nomorSet.has(String(i.nomor)));
 
@@ -967,6 +991,7 @@ function ktuRekap(body, sess){
     itemsI.map(i => [`${i.nomor}|${i.idx}`, i.pekerjaan])
   );
 
+  // 5) Build payload kaya → FE tidak perlu bergantung ke actuals.rkb untuk field scope
   const items = [];
   const sum = {};
 
@@ -975,23 +1000,32 @@ function ktuRekap(body, sess){
     const keyNI = `${b.nomor}|${b.item_idx}`;
     const pekerjaan = pekerjaanByKey[keyNI] || '';
 
-    const nama   = b.nama || '';
-    const satuan = b.satuan || '';
-    const jumlah = Number(b.jumlah || 0);
-    const no_material = String(b.no_material || ''); // ← KIRIMKAN KE FE
+    const nama        = b.nama || '';
+    const satuan      = b.satuan || '';
+    const jumlah      = Number(b.jumlah || 0);
+    const no_material = String(b.no_material || '');
+
+    const estate_id   = String(head.estate_id || '');
+    const rayon_id    = String(head.rayon_id  || '');
+    const divisi_id   = String(head.divisi_id || '');
+    const estate_full = head.estate_full || '';
+    const status      = String(head.status || '').toUpperCase(); // FE Anda sudah normalize ke UPPER
 
     items.push({
       nomor: b.nomor,
       periode: head.periode || '',
+      estate_id, rayon_id, divisi_id,
+      estate_full,
       divisi: head.divisi || head.divisi_id || '',
       pekerjaan,
-      no_material,               // ← field baru di payload
+      no_material,
       nama,
       jumlah,
-      satuan
+      satuan,
+      status
     });
 
-    // Agregasi total estate (tetap seperti sebelumnya — per nama+satuan)
+    // Agregasi total estate (per nama+satuan)
     const key = nama + '|' + satuan;
     sum[key] = (sum[key] || 0) + jumlah;
   });
@@ -1126,6 +1160,28 @@ function ensureAllSheets(){
   // RKH
   ensureRKH();  ensureRKHItems();  ensureRKHBahan();
 }
+
+// === [HELPER] Ambil daftar estate scope efektif (Admin=opsional semua; selain itu default estate user) ===
+function estateScope_(me, body){
+  const ids = new Set();
+  const arr = Array.isArray(body?.estate_ids) ? body.estate_ids : [];
+  arr.forEach(x => { if (x !== null && x !== undefined && String(x).trim() !== '') ids.add(String(x)); });
+
+  // Jika Admin & estate_ids tidak dikirim → biarkan kosong (artinya semua estate)
+  const role = String(me.role||'').toLowerCase();
+  if (role === 'admin') return Array.from(ids); // bisa kosong (all) atau subset
+
+  // Non-Admin: jika estate_ids kosong → pakai estate_id user
+  if (!ids.size && me.estate_id) ids.add(String(me.estate_id));
+  return Array.from(ids);
+}
+
+// === [HELPER] Normalisasi status ke lowercase konsisten agar gampang difilter ===
+function normStatus_(s){
+  if (!s) return '';
+  return String(s).trim().toLowerCase();
+}
+
 
 // ====== [HELPER] Resolve scope (estate_id/rayon_id/divisi_id + estate_full) dari baris RKB atau username ======
 function resolveScopeFromRow_(r) {
@@ -1796,30 +1852,52 @@ function pdoManagerApprove(body, sess){
 
 function ktuRekapPDO(body, sess){
   ensurePDO();
-  const m = mastersAsMap();
+  const me = getUserFromSession(sess);
+  const role = String(me.role||'').toLowerCase();
+  const allowEstates = new Set(estateScope_(me, body).map(String));
+  const stFilter = normStatus_(body?.status||''); // optional
 
-  // Ambil semua PDO, lalu mapping ke payload ringkas untuk FE
-  const rows = getAll(ensurePDO()).map(r=>{
+  // Ambil header PDO
+  let rows = getAll(ensurePDO());
+
+  // Estate filter
+  if (role !== 'admin') {
+    if (allowEstates.size) {
+      rows = rows.filter(r => allowEstates.has(String(r.estate_id||'')));
+    } else {
+      rows = rows.filter(r => String(r.estate_id||'') === String(me.estate_id||''));
+    }
+  } else {
+    if (allowEstates.size) {
+      rows = rows.filter(r => allowEstates.has(String(r.estate_id||'')));
+    }
+  }
+
+  // Status filter (optional)
+  if (stFilter && stFilter !== 'all'){
+    rows = rows.filter(r => normStatus_(r.status) === stFilter);
+  }
+
+  // Lengkapi payload seperti sebelumnya (plus tetap kirim status apa adanya)
+  const m = mastersAsMap();
+  const out = rows.map(r=>{
     const est = m._idx.estateById[String(r.estate_id||'')] || {};
     const ray = m._idx.rayonById[String(r.rayon_id||'')]   || {};
-
     return {
       nomor      : r.nomor,
       periode    : r.periode || '',
       divisi_id  : r.divisi_id || '',
       rayon_kode : (ray.kode || ray.kd_rayon || ''),
-      // penting: pakai nama_panjang dulu agar match dengan filter FE
+      estate_id  : r.estate_id || '',
       estate_nama: (est.nama_panjang || est.nama || ''),
       total_rp   : Number(r.total_rp || 0),
-
-      // === tambahkan status ke FE ===
-      // biarkan apa adanya (lowercase). FE sudah normalize ke UPPER.
-      status     : (r.status || '')    // 'draft' | 'submitted' | 'askep_approved' | 'full_approved' | ...
+      status     : (r.status || '') // biarkan lowercase; FE Anda sudah normalize
     };
   });
 
-  return { ok:true, rows };
+  return { ok:true, rows: out };
 }
+
 
 
 function getPdoDetail(body, sess){
