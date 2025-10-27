@@ -812,20 +812,49 @@ function passDivisi(row){
         const HK  = items.filter(x=> String(x.tipe_item)==='HK');
         const BOR = items.filter(x=> String(x.tipe_item)==='BOR');
 
+        // === Hitung total per bagian ===
+        const totalHK  = HK.reduce((a,r)=> a + Number(r.total_rp||0), 0);
+        const totalBOR = BOR.reduce((a,r)=> a + Number(r.total_rp||0), 0);
+
+        // premi opsional dari header (0 jika tidak ada)
+        const premiPanen = Number(hdr.premi_panen||0);
+        const premiNon   = Number(hdr.premi_non_panen||0);
+
+        // Total PDO: pakai header.total_rp jika ada, else hitung dari items + premi
+        const totalPDO = (Number(hdr.total_rp||0) > 0)
+          ? Number(hdr.total_rp||0)
+          : (totalHK + totalBOR + premiPanen + premiNon);
+
         const rowsHK = HK.map((row,i)=>`
-          <tr><td>${i+1}</td><td>${row.pekerjaan||''}</td><td class="text-end">${fmt.id0(row.hk||0)}</td><td class="text-end">${fmt.idr(row.total_rp||0)}</td></tr>
+          <tr>
+            <td>${i+1}</td>
+            <td>${row.pekerjaan||''}</td>
+            <td class="text-end">${fmt.id0(row.hk||0)}</td>
+            <td class="text-end">${fmt.idr(row.total_rp||0)}</td>
+          </tr>
         `).join('') || `<tr><td colspan="4" class="text-center text-muted">Tidak ada pekerjaan HK.</td></tr>`;
 
         const rowsBOR = BOR.map((row,i)=>`
-          <tr><td>${i+1}</td><td>${row.pekerjaan||''}</td><td class="text-end">${fmt.id0(row.qty||0)}</td><td class="text-end">${fmt.idr(row.total_rp||0)}</td></tr>
+          <tr>
+            <td>${i+1}</td>
+            <td>${row.pekerjaan||''}</td>
+            <td class="text-end">${fmt.id0(row.qty||0)}</td>
+            <td class="text-end">${fmt.idr(row.total_rp||0)}</td>
+          </tr>
         `).join('') || `<tr><td colspan="4" class="text-center text-muted">Tidak ada pekerjaan borongan.</td></tr>`;
 
         const st = normalizeStatus(hdr.status||hdr.raw_status||hdr.state);
         return `
           <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center">
-              <div><b>${hdr.nomor||'-'}</b> · ${fmt.periodeYM(hdr.periode)||'-'} · ${labelDivisiFromKode(hdr.divisi_id)||'-'} · ${(estateRowById(hdr.estate_id).nama_panjang||'')}</div>
-              <span class="status-pill st-${st}">${st}</span>
+              <div>
+                <b>${hdr.nomor||'-'}</b> · ${fmt.periodeYM(hdr.periode)||'-'} ·
+                ${labelDivisiFromKode(hdr.divisi_id)||'-'} · ${(estateRowById(hdr.estate_id).nama_panjang||'')}
+              </div>
+              <div class="d-flex align-items-center gap-3">
+                <div class="fw-semibold">Total PDO: ${fmt.idr(totalPDO)}</div>
+                <span class="status-pill st-${st}">${st}</span>
+              </div>
             </div>
             <div class="card-body p-2">
               <div class="row g-2">
@@ -833,8 +862,16 @@ function passDivisi(row){
                   <h6 class="mb-1">Pekerjaan HK</h6>
                   <div class="table-responsive">
                     <table class="table table-sm table-bordered align-middle">
-                      <thead class="table-light"><tr><th>#</th><th>Jenis</th><th class="text-end">HK</th><th class="text-end">Total (Rp)</th></tr></thead>
+                      <thead class="table-light">
+                        <tr><th>#</th><th>Jenis</th><th class="text-end">HK</th><th class="text-end">Total (Rp)</th></tr>
+                      </thead>
                       <tbody>${rowsHK}</tbody>
+                      <tfoot>
+                        <tr>
+                          <th colspan="3" class="text-end">Total</th>
+                          <th class="text-end">${fmt.idr(totalHK)}</th>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 </div>
@@ -842,17 +879,34 @@ function passDivisi(row){
                   <h6 class="mb-1">Pekerjaan Borongan</h6>
                   <div class="table-responsive">
                     <table class="table table-sm table-bordered align-middle">
-                      <thead class="table-light"><tr><th>#</th><th>Jenis</th><th class="text-end">Qty</th><th class="text-end">Total (Rp)</th></tr></thead>
+                      <thead class="table-light">
+                        <tr><th>#</th><th>Jenis</th><th class="text-end">Qty</th><th class="text-end">Total (Rp)</th></tr>
+                      </thead>
                       <tbody>${rowsBOR}</tbody>
+                      <tfoot>
+                        <tr>
+                          <th colspan="3" class="text-end">Total</th>
+                          <th class="text-end">${fmt.idr(totalBOR)}</th>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 </div>
               </div>
+
+              ${
+                (premiPanen || premiNon)
+                  ? `<div class="mt-2 small text-muted">
+                      Premi Panen: ${fmt.idr(premiPanen)} · Premi Non-Panen: ${fmt.idr(premiNon)}
+                    </div>`
+                  : ''
+              }
             </div>
           </div>`;
       }).join('');
       U.toast('Detail dimuat.','success');
     };
+
 
     // Gambar tabel awal
     drawTable();
