@@ -36,63 +36,105 @@ Pages.ktuRekapPDO = async function(){
   const M = {
     ydivisi: STORE.getMaster('ydivisi') || [],
     yrayon:  STORE.getMaster('yrayon')  || [],
-    yestate: STORE.getMaster('yestate') || []
+    yestate: STORE.getMaster('yestate') || [],
+    yplant:  STORE.getMaster('yplant')  || []
   };
 
+
+  function _plantNameByEstateIdSync(estate_id){
+    try{
+      const est = (M.yestate||[]).find(e => String(e.id) === String(estate_id)) || {};
+      // ambil plant_id dari estate
+      let pid = est.plant_id || est.id_plant || est.kd_plant || est.kode_plant;
+      // jika plant_id tak ada, coba baca nama PT langsung dari estate (beberapa DB taruh di sini)
+      if(!pid){
+        const byName = (
+          est.plant_nama || est.nama_company || est.plant_name ||
+          est.company || est.perusahaan || ''
+        );
+        if(String(byName).trim()) return String(byName).trim();
+      }
+      // resolve ke master plant
+      const p = (M.yplant||[]).find(x =>
+        String(x.id)===String(pid) || String(x.plant_id)===String(pid) ||
+        String(x.kode)===String(pid) || String(x.kd_plant)===String(pid)
+      );
+      if(p){
+        return String(p.nama_panjang || p.nama || p.plant_nama || p.company || p.plant || '').trim();
+      }
+      // fallback: jika hanya ada 1 plant di master, pakai itu
+      if((M.yplant||[]).length === 1){
+        const only = M.yplant[0];
+        return String(only.nama_panjang || only.nama || only.company || '').trim();
+      }
+    }catch(_){/* ignore */}
+    // hard fallback terakhir (sesuai sebelumnya)
+    return 'KARYAMAS PLANTATION';
+  }
+
+  function _formatCompanyLabel(name){
+    const raw = String(name||'').trim();
+    if(!raw) return 'KARYAMAS PLANTATION';
+    const upper = raw.toUpperCase();
+    // jika sudah mulai dengan "PT" atau "P.T" atau "PT.", biarkan tanpa menambah "PT."
+    if(/^P\.?T\.?\s/.test(upper)){ return upper; }
+    return `PT. ${upper}`;
+  }
+
   // === Ambil scope estate user dari profile ===
-function getUserEstateScope(){
-  const prof = SESSION.profile() || {};
-  const rawRole = String(prof.role||'').trim().toLowerCase();
+  function getUserEstateScope(){
+    const prof = SESSION.profile() || {};
+    const rawRole = String(prof.role||'').trim().toLowerCase();
 
-  // Kumpulan id estate yang diizinkan
-  const allow = new Set();
+    // Kumpulan id estate yang diizinkan
+    const allow = new Set();
 
-  // 1) Sumber langsung yang umum dipakai backend
-  //    - estate_id: string tunggal
-  //    - estate_ids / estates: array id
-  const directOne  = prof.estate_id || prof.estate || prof.est || '';
-  const directMany = prof.estate_ids || prof.estates || [];
+    // 1) Sumber langsung yang umum dipakai backend
+    //    - estate_id: string tunggal
+    //    - estate_ids / estates: array id
+    const directOne  = prof.estate_id || prof.estate || prof.est || '';
+    const directMany = prof.estate_ids || prof.estates || [];
 
-  if (directOne) allow.add(String(directOne));
-  if (Array.isArray(directMany)) directMany.forEach(x => x && allow.add(String(x)));
+    if (directOne) allow.add(String(directOne));
+    if (Array.isArray(directMany)) directMany.forEach(x => x && allow.add(String(x)));
 
-  // 2) Beberapa profil menyimpan daftar DIVISI user → turunkan estate_id via master
-  const divs = prof.divisi_ids || prof.divisis || prof.divisions || [];
-  if (Array.isArray(divs) && divs.length){
-    divs.forEach(did=>{
-      const hit = (M.ydivisi||[]).find(dd => String(dd.id)===String(did));
-      if (hit && hit.estate_id) allow.add(String(hit.estate_id));
-    });
+    // 2) Beberapa profil menyimpan daftar DIVISI user → turunkan estate_id via master
+    const divs = prof.divisi_ids || prof.divisis || prof.divisions || [];
+    if (Array.isArray(divs) && divs.length){
+      divs.forEach(did=>{
+        const hit = (M.ydivisi||[]).find(dd => String(dd.id)===String(did));
+        if (hit && hit.estate_id) allow.add(String(hit.estate_id));
+      });
+    }
+
+    // 3) Ada juga yang hanya menyimpan "estate_nama" → mapping ke id
+    if (prof.estate_nama){
+      const hit = (M.yestate||[]).find(e=>{
+        const a = String(e.nama_panjang||'').trim().toLowerCase();
+        const b = String(e.nama||'').trim().toLowerCase();
+        const t = String(prof.estate_nama||'').trim().toLowerCase();
+        return t===a || t===b;
+      });
+      if (hit) allow.add(String(hit.id));
+    }
+
+    // Catatan: untuk role non-KTU biarkan kosong (artinya bebas, pakai filter UI).
+    // Untuk KTU, bila kosong, kita tidak paksa (fallback ke UI).
+    return { role: rawRole, estateIds: Array.from(allow) };
   }
 
-  // 3) Ada juga yang hanya menyimpan "estate_nama" → mapping ke id
-  if (prof.estate_nama){
-    const hit = (M.yestate||[]).find(e=>{
-      const a = String(e.nama_panjang||'').trim().toLowerCase();
-      const b = String(e.nama||'').trim().toLowerCase();
-      const t = String(prof.estate_nama||'').trim().toLowerCase();
-      return t===a || t===b;
+  // === [BARU] Terapkan scope estate user ke headers (khusus KTU)
+  function applyUserEstateScope(rows){
+    const { role, estateIds } = getUserEstateScope();
+    if (role !== 'ktu') return rows;        // hanya KTU yang di-hard-scope
+    if (!estateIds.length) return rows;     // tak ada info scope → biarkan
+
+    const allowed = new Set(estateIds.map(String));
+    return (rows||[]).filter(r=>{
+      // r.estate_id sudah dinormalisasi di normalizeHeaders()
+      return r.estate_id && allowed.has(String(r.estate_id));
     });
-    if (hit) allow.add(String(hit.id));
   }
-
-  // Catatan: untuk role non-KTU biarkan kosong (artinya bebas, pakai filter UI).
-  // Untuk KTU, bila kosong, kita tidak paksa (fallback ke UI).
-  return { role: rawRole, estateIds: Array.from(allow) };
-}
-
-// === [BARU] Terapkan scope estate user ke headers (khusus KTU)
-function applyUserEstateScope(rows){
-  const { role, estateIds } = getUserEstateScope();
-  if (role !== 'ktu') return rows;        // hanya KTU yang di-hard-scope
-  if (!estateIds.length) return rows;     // tak ada info scope → biarkan
-
-  const allowed = new Set(estateIds.map(String));
-  return (rows||[]).filter(r=>{
-    // r.estate_id sudah dinormalisasi di normalizeHeaders()
-    return r.estate_id && allowed.has(String(r.estate_id));
-  });
-}
 
   // -------------------------------------------------------------
   // 3) UTIL (formatting & helpers)
@@ -244,14 +286,10 @@ function passDivisi(row){
     const est = estateRowById(estate_id);
     const ray = rayonRowById(rayon_id);
     const div = divisiRowById(divisi_id);
-    const pick = (row, ...keys)=> {
-      for(const k of keys){
-        if(row && row[k]!=null && String(row[k]).trim()!=='') return String(row[k]);
-      }
-      return '';
-    };
+    const pick = (row, ...keys)=> {for(const k of keys){if(row && row[k]!=null && String(row[k]).trim()!=='') return String(row[k]); } return ''; };
+    const companyName = _plantNameByEstateIdSync(estate_id);
     return {
-      company: pick(est, 'plant_nama','company_name','nama_company','plant_name','plant') || 'BUANA TUNAS SEJAHTERA',
+      company: companyName || 'KARYAMAS PLANTATION',
       estateFull: pick(est, 'nama_panjang','nama','estate_nama','nama_estate'),
       manager: pick(est, 'manager','manager_nama','nama_mgr'),
       ktu:     pick(est, 'ktu','ktu_nama','nama_ktu'),
@@ -527,7 +565,7 @@ function passDivisi(row){
         estate_id: h.estate_id, rayon_id: h.rayon_id, divisi_id: h.divisi_id
       });
 
-      const company   = (signer.company ? `PT. ${String(signer.company).toUpperCase()}` : 'PT. BUANA TUNAS SEJAHTERA');
+      const company = _formatCompanyLabel(signer.company);
       const estateFull= signer.estateFull || estRow.nama_panjang || estRow.nama || '';
 
       const HK  = it.filter(x=> String(x.tipe_item)==='HK');

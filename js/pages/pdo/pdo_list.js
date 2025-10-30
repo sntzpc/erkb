@@ -50,7 +50,7 @@ function _plantNameByEstateIdSync(estate_id){
 
 function _formatCompanyLabel(name){
   const raw = String(name||'').trim();
-  if(!raw) return 'PT. BUANA TUNAS SEJAHTERA';
+  if(!raw) return 'KARYAMAS PLANTATION';
   const upper = raw.toUpperCase();
   // jika sudah mulai dengan "PT" atau "P.T" atau "PT.", biarkan tanpa menambah "PT."
   if(/^P\.?T\.?\s/.test(upper)){ return upper; }
