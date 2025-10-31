@@ -15,6 +15,11 @@ const SHEETS = {
   RKB_BAHAN: 'rkb_bahan'
 };
 
+const KAPA_SHEETS = {
+  RKB: 'rkb_kapa_hk',
+  RKH: 'rkh_kapa_hk'
+};
+
 const MASTER_SHEETS = [
   'yplant','yestate','yrayon','ydivisi','ykomplek','yblok','yactivity','ybahan','yorg_map','yrates'
 ];
@@ -36,7 +41,7 @@ function doPost(e){
       listForAskep, askepApprove, askepComment,
       listForManager, managerApprove, managerComment,
       ktuRekap, rkbBackfillScope, getRkbDetail,
-      inboxList, inboxMarkRead, inboxUnreadCount,
+      inboxList, inboxMarkRead, inboxUnreadCount, listKapasitasHK, rebuildKapasitasHK,
       
       // Admin Master CRUD
       listMaster, replaceMaster, upsertMaster, deleteMaster,
@@ -1152,7 +1157,7 @@ function ensureAllSheets(){
   ensureUsers();       // users (opsional, utk utilitas admin)
   
   // RKB
-  ensureRKB(); ensureComments(); ensureRKBItems(); ensureRKBBahan();  
+  ensureRKB(); ensureComments(); ensureRKBItems(); ensureRKBBahan();  ensureKapasitasHK();
   
   // PDO
   ensurePDO(); ensurePDOItems(); ensurePDOComments();
@@ -2265,3 +2270,156 @@ function getRkhDetail(body, sess){
 }
 
 // === [END RKH MODULE] =====================================================
+
+
+// === NEW: Kapasitas HK sheets ===
+function ensureKapasitasHK(){
+  const s1 = sh(KAPA_SHEETS.RKB);
+  if (s1.getLastRow() < 1){
+    headers(s1, [
+      'no','nomor_rkb','periode','divisi',
+      'hk_bhl','hk_sku','hk_total',
+      'tk_bhl','tk_sku','tk_total','status'
+    ]);
+  }
+  const s2 = sh(KAPA_SHEETS.RKH);
+  if (s2.getLastRow() < 1){
+    headers(s2, [
+      'no','nomor_rkh','tanggal','periode','divisi','ref_rkb',
+      'tk_bhl','tk_sku','tk_total','status'
+    ]);
+  }
+  return {s1,s2};
+}
+
+/**
+ * Rebuild &/or list Kapasitas HK untuk RKB/RKH.
+ * body: { mode?: 'list'|'rebuild', kind: 'rkb'|'rkh', periode?: 'YYYY-MM' }
+ * Scope mengikuti role user (Admin: semua, Asisten: divisi, lainnya: estate).
+ */
+function listKapasitasHK(body, sess){
+  const me = getUserFromSession(sess);
+  const kind = String(body.kind||'rkb').toLowerCase();
+  const periode = String(body.periode||'').trim();
+  if(kind==='rkb'){
+    return { ok:true, data: _kapaRkb_(me, periode) };
+  } else {
+    return { ok:true, data: _kapaRkh_(me, periode) };
+  }
+}
+
+function rebuildKapasitasHK(body, sess){
+  ensureKapasitasHK();
+  const me = getUserFromSession(sess);
+  const kind = String(body.kind||'rkb').toLowerCase();
+  const periode = String(body.periode||'').trim();
+
+  if(kind==='rkb'){
+    const data = _kapaRkb_(me, periode);
+    const s = sh(KAPA_SHEETS.RKB);
+    s.clearContents(); headers(s, [
+      'no','nomor_rkb','periode','divisi','hk_bhl','hk_sku','hk_total','tk_bhl','tk_sku','tk_total','status'
+    ]);
+    const rows = data.map((r,i)=>[i+1, r.nomor, r.periode, r.divisi, r.hk_bhl, r.hk_sku, r.hk_total, r.tk_bhl, r.tk_sku, r.tk_total, r.status]);
+    if(rows.length) s.getRange(2,1,rows.length, rows[0].length).setValues(rows);
+    return { ok:true, written: rows.length };
+  } else {
+    const data = _kapaRkh_(me, periode);
+    const s = sh(KAPA_SHEETS.RKH);
+    s.clearContents(); headers(s, [
+      'no','nomor_rkh','tanggal','periode','divisi','ref_rkb','tk_bhl','tk_sku','tk_total','status'
+    ]);
+    const rows = data.map((r,i)=>[i+1, r.nomor, r.tanggal, r.periode, r.divisi, r.ref_rkb, r.tk_bhl, r.tk_sku, r.tk_total, r.status]);
+    if(rows.length) s.getRange(2,1,rows.length, rows[0].length).setValues(rows);
+    return { ok:true, written: rows.length };
+  }
+}
+
+// Scope helpers
+function _scopeRkbHdr_(me){
+  const all = getAll(sh(SHEETS.RKB));
+  const role = String(me.role||'');
+  if (role==='Admin') return all;
+  if (role==='Asisten') return all.filter(x => String(x.divisi_id||'') === String(me.divisi_id||''));
+  return all.filter(x => String(x.estate_id||'') === String(me.estate_id||''));
+}
+function _scopeRkhHdr_(me){
+  const all = getAll(sh(RKH_SHEETS.RKH));
+  const role = String(me.role||'');
+  if (role==='Admin') return all;
+  if (role==='Asisten') return all.filter(x => String(x.divisi_id||'') === String(me.divisi_id||''));
+  return all.filter(x => String(x.estate_id||'') === String(me.estate_id||''));
+}
+
+function _kapaRkb_(me, periode){
+  ensureRKB(); ensureRKBItems();
+  const hdr = _scopeRkbHdr_(me).filter(h => !periode || String(h.periode||'').indexOf(periode)===0);
+  const nomorSet = new Set(hdr.map(h=> String(h.nomor)));
+  const items = getAll(sh(SHEETS.RKB_ITEMS)).filter(i=> nomorSet.has(String(i.nomor)));
+  const byNo = {};
+  items.forEach(it=>{
+    const no = String(it.nomor||''); if(!byNo[no]) byNo[no]={bhl:0, sku:0, ttl:0};
+    byNo[no].bhl += Number(it.hk_bhl||0);
+    byNo[no].sku += Number(it.hk_sku||0);
+    byNo[no].ttl += Number(it.hk_total||0);
+  });
+  const out=[];
+  hdr.forEach(h=>{
+    const a = byNo[String(h.nomor)] || {bhl:0, sku:0, ttl:0};
+    const tk_bhl = Math.ceil((a.bhl||0)/20);
+    const tk_sku = Math.ceil((a.sku||0)/25);
+    out.push({
+      nomor: h.nomor,
+      periode: yyyymm_(h.periode),
+      divisi: String(h.divisi||''),
+      hk_bhl: Math.round(a.bhl||0),
+      hk_sku: Math.round(a.sku||0),
+      hk_total: Math.round(a.ttl||0),
+      tk_bhl, tk_sku,
+      tk_total: tk_bhl + tk_sku,
+      status: String(h.status||'')||'-'
+    });
+  });
+  return out;
+}
+
+function _kapaRkh_(me, periode){
+  ensureRKH(); ensureRKHItems();
+  const hdr = _scopeRkhHdr_(me).filter(h => !periode || String(h.periode||'').indexOf(periode)===0);
+  const nomorSet = new Set(hdr.map(h=> String(h.nomor)));
+  const items = getAll(sh(RKH_SHEETS.RKH_ITEMS)).filter(i=> nomorSet.has(String(i.nomor)));
+  const byNo = {};
+  items.forEach(it=>{
+    const no = String(it.nomor||''); if(!byNo[no]) byNo[no]={bhl:0, sku:0, ttl:0};
+    byNo[no].bhl += Number(it.hk_bhl||0);
+    byNo[no].sku += Number(it.hk_sku||0);
+    byNo[no].ttl += Number(it.hk_total||0);
+  });
+  const out=[];
+  hdr.forEach(h=>{
+    const a = byNo[String(h.nomor)] || {bhl:0, sku:0, ttl:0};
+    const tk_bhl = Math.round(a.bhl||0);
+    const tk_sku = Math.round(a.sku||0);
+    out.push({
+      nomor: h.nomor,
+      tanggal: (h.tanggal||''),
+      periode: yyyymm_(h.periode),
+      divisi: String(h.divisi||''),
+      ref_rkb: String(h.ref_rkb||'')||'-',
+      tk_bhl, tk_sku,
+      tk_total: Math.round(tk_bhl + tk_sku),
+      status: String(h.status||'')||'-'
+    });
+  });
+  return out;
+}
+
+function yyyymm_(p){
+  try{
+    if(!p) return '';
+    if (typeof p === 'string' && /^\d{4}-\d{2}$/.test(p)) return p;
+    const tz = Session.getScriptTimeZone() || 'Asia/Jakarta';
+    const d = new Date(p);
+    return Utilities.formatDate(d, tz, 'yyyy-MM');
+  }catch(_){ return String(p||''); }
+}

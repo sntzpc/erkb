@@ -230,6 +230,12 @@ window.addEventListener('DOMContentLoaded', () => {
       `;
     }
 
+    // Kapasitas HK (semua role boleh melihat sesuai otorisasi estate)
+    html += `
+      <li><hr class="dropdown-divider"></li>
+      <li><a class="dropdown-item" href="#/rkb/kapa-hk">Kapasitas HK</a></li>
+    `;
+
     if(html.trim()) addDropdown('RKB', html);
   }
 
@@ -272,6 +278,14 @@ window.addEventListener('DOMContentLoaded', () => {
     addDropdown('RKH', `
       <li><a class="dropdown-item" href="#/rkh/form">Form</a></li>
       <li><a class="dropdown-item" href="#/rkh/draft">Draft</a></li>
+      <li><hr class="dropdown-divider"></li>
+      <li><a class="dropdown-item" href="#/rkh/kapa-hk">Kapasitas HK</a></li>
+    `);
+  }
+  else {
+  // Role lain tetap dapat melihat halaman Kapasitas HK RKH
+    addDropdown('RKH', `
+      <li><a class="dropdown-item" href="#/rkh/kapa-hk">Kapasitas HK</a></li>
     `);
   }
 
@@ -380,6 +394,7 @@ window.addEventListener('DOMContentLoaded', () => {
         case hash==='#/rkb/draft':                Pages.rkbList('draft'); break;
         case hash==='#/rkb/approvals/askep':      Pages.rkbApprovalsAskep(); break;
         case hash==='#/rkb/approvals/manager':    Pages.rkbApprovalsManager(); break;
+        case hash==='#/rkb/kapa-hk':              Pages.rkbKapaHK(); break;
 
         // PDO
         case hash==='#/pdo/form':                 Pages.pdoForm(); break;
@@ -390,6 +405,7 @@ window.addEventListener('DOMContentLoaded', () => {
         // RKH
         case hash==='#/rkh/form':                 Pages.rkhForm(); break;
         case hash==='#/rkh/draft':                Pages.rkhList('draft'); break;
+        case hash==='#/rkh/kapa-hk':              Pages.rkhKapaHK(); break;
 
         // Kotak keluar & pesan
         case hash==='#/outbox':                   Pages.rkbList('outbox'); break;

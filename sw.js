@@ -1,5 +1,5 @@
 // sw.js
-const CACHE = 'rkb-app-v2.15'; // bump version
+const CACHE = 'rkb-app-v2.16'; // bump version
 const RAW_ASSETS = [
   './',
   './index.html',
@@ -10,6 +10,7 @@ const RAW_ASSETS = [
   './js/pages/inbox.js',
   './js/pages/rkb/rkb_form.js',
   './js/pages/rkb/rkb_list.js',
+  './js/pages/rkb/rkb_kapa_hk.js',
   './js/pages/rkb/rkb_approvals_askep.js',
   './js/pages/rkb/rkb_approvals_manager.js',
   './js/pages/pdo/pdo_form.js',
@@ -19,6 +20,7 @@ const RAW_ASSETS = [
   './js/pages/pdo/ktu_rekap_pdo.js',
   './js/pages/rkh/rkh_form.js',
   './js/pages/rkh/rkh_list.js',
+  './js/pages/rkh/rkh_kapa_hk.js',
   './js/pages/ktu.js',
   // <<< PERBAIKAN: jangan pakai path root
   './js/pages/master/settings.master.js',
