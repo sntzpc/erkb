@@ -1,5 +1,5 @@
 // sw.js
-const CACHE = 'rkb-app-v2.16'; // bump version
+const CACHE = 'rkb-app-v2.17'; // bump version
 const RAW_ASSETS = [
   './',
   './index.html',
