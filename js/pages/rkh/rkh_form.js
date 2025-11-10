@@ -863,7 +863,7 @@ async function warmRkbActualsAll(){
     function suggest(q, type) {
       const src = type === "blok" ? M.blok : M.komplek;
       const ql = q.toLowerCase();
-      return src.filter((x) => _str(x.kode).toLowerCase().includes(ql)).slice(0, 10);
+      return src.filter((x) => _str(x.kode).toLowerCase().includes(ql)).slice(0, 20);
     }
     function addRow(r) { state.rows.push(r); renderRows(); }
     function renderRows() {
